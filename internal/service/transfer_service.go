@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -25,6 +24,7 @@ type TransferService struct {
 	walletRepo    *repository.WalletRepo
 	walletService *WalletService
 	sourcingEng   *SourcingEngine
+	payoutService *PayoutService
 	logger        *slog.Logger
 }
 
@@ -33,6 +33,7 @@ func NewTransferService(
 	walletRepo *repository.WalletRepo,
 	walletService *WalletService,
 	sourcingEng *SourcingEngine,
+	payoutService *PayoutService,
 	logger *slog.Logger,
 ) *TransferService {
 	return &TransferService{
@@ -40,6 +41,7 @@ func NewTransferService(
 		walletRepo:    walletRepo,
 		walletService: walletService,
 		sourcingEng:   sourcingEng,
+		payoutService: payoutService,
 		logger:        logger,
 	}
 }
@@ -161,9 +163,36 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 		return nil, fmt.Errorf("create payout leg: %w", err)
 	}
 
-	// In production, call Paystack Transfer API here
-	// For now, simulate success
-	s.simulatePayout(ctx, payoutTxn)
+	// Execute real payout via Paystack
+	if s.payoutService != nil && s.payoutService.IsEnabled() {
+		providerRef, err := s.payoutService.SendPayout(
+			ctx, payoutRef, req.Amount,
+			req.RecipientAccount, req.RecipientBank, req.RecipientName,
+		)
+		if err != nil {
+			s.logger.Error("payout failed", "error", err, "payout_ref", payoutRef)
+			s.txnRepo.UpdateStatus(ctx, payoutTxn.ID, model.TxnStatusFailed, err.Error())
+			s.txnRepo.UpdateStatus(ctx, parentTxn.ID, model.TxnStatusFailed, "payout failed")
+
+			// Release holds
+			for _, leg := range plan.Legs {
+				if leg.Source == "wallet" {
+					if wallet, _ := s.walletRepo.GetByUserID(ctx, userID); wallet != nil {
+						s.walletRepo.ReleaseHold(ctx, wallet.ID, leg.Amount+leg.Fee)
+					}
+				}
+			}
+
+			return nil, fmt.Errorf("payout failed: %w", err)
+		}
+		s.txnRepo.UpdateProviderRef(ctx, payoutTxn.ID, providerRef)
+	} else {
+		// Fallback: mark as completed (no Paystack configured)
+		s.logger.Warn("payout service not configured, marking as completed",
+			"payout_ref", payoutRef,
+		)
+		s.txnRepo.UpdateProviderRef(ctx, payoutTxn.ID, "simulated-"+payoutRef)
+	}
 
 	// Complete wallet debit (release hold and deduct)
 	for _, leg := range plan.Legs {
@@ -218,18 +247,4 @@ func (s *TransferService) GetTransferByRef(ctx context.Context, ourRef string) (
 		return nil, ErrTransferNotFound
 	}
 	return txn, nil
-}
-
-func (s *TransferService) simulatePayout(ctx context.Context, txn *model.Transaction) {
-	// In production, this calls Paystack Transfer API
-	// The PSP returns a reference and status
-	s.logger.Info("simulating payout",
-		"transaction_id", txn.ID,
-		"amount", txn.Amount,
-		"recipient", txn.RecipientAccount,
-	)
-	time.Sleep(100 * time.Millisecond)
-
-	providerRef := fmt.Sprintf("PS-%s", uuid.New().String()[:12])
-	s.txnRepo.UpdateProviderRef(ctx, txn.ID, providerRef)
 }

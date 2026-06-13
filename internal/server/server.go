@@ -125,7 +125,8 @@ func (s *Server) setupRoutes() {
 	)
 	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.logger)
 	sourcingEngine := service.NewSourcingEngine(walletService, bankRepo, s.logger)
-	transferService := service.NewTransferService(txnRepo, walletRepo, walletService, sourcingEngine, s.logger)
+	payoutService := service.NewPayoutService(paystackClient, s.logger)
+	transferService := service.NewTransferService(txnRepo, walletRepo, walletService, sourcingEngine, payoutService, s.logger)
 
 	// Handlers
 	healthHandler := handler.NewHealthHandler()
