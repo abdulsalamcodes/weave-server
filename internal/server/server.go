@@ -18,6 +18,7 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/config"
 	"github.com/abdulsalamcodes/weave-server/internal/handler"
 	"github.com/abdulsalamcodes/weave-server/internal/middleware"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/llm"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
@@ -95,6 +96,12 @@ func (s *Server) setupRoutes() {
 		s.logger.Info("paystack client initialized")
 	}
 
+	var llmClient *llm.Client
+	if s.cfg.LLM.APIKey != "" {
+		llmClient = llm.NewClient(s.cfg.LLM.APIKey, s.cfg.LLM.Model)
+		s.logger.Info("llm client initialized", "model", s.cfg.LLM.Model)
+	}
+
 	// Services
 	authService := service.NewAuthService(
 		userRepo, walletRepo,
@@ -111,7 +118,7 @@ func (s *Server) setupRoutes() {
 	authHandler := handler.NewAuthHandler(authService, s.logger)
 	walletHandler := handler.NewWalletHandler(walletService, s.logger)
 	transferHandler := handler.NewTransferHandler(transferService, s.logger)
-	chatHandler := handler.NewChatHandler(s.logger)
+	chatHandler := handler.NewChatHandler(transferService, walletService, authService, llmClient, s.logger)
 	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, s.logger)
 
 	// Routes
