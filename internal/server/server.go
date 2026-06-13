@@ -19,6 +19,8 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/handler"
 	"github.com/abdulsalamcodes/weave-server/internal/middleware"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/llm"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/mono"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/okra"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
@@ -102,6 +104,18 @@ func (s *Server) setupRoutes() {
 		s.logger.Info("llm client initialized", "model", s.cfg.LLM.Model)
 	}
 
+	var okraClient *okra.Client
+	if s.cfg.Okra.ClientID != "" && s.cfg.Okra.Secret != "" {
+		okraClient = okra.NewClient(s.cfg.Okra.ClientID, s.cfg.Okra.Secret)
+		s.logger.Info("okra client initialized")
+	}
+
+	var monoClient *mono.Client
+	if s.cfg.Mono.SecretKey != "" {
+		monoClient = mono.NewClient(s.cfg.Mono.SecretKey)
+		s.logger.Info("mono client initialized")
+	}
+
 	// Services
 	authService := service.NewAuthService(
 		userRepo, walletRepo,
@@ -119,6 +133,7 @@ func (s *Server) setupRoutes() {
 	walletHandler := handler.NewWalletHandler(walletService, s.logger)
 	transferHandler := handler.NewTransferHandler(transferService, s.logger)
 	chatHandler := handler.NewChatHandler(transferService, walletService, authService, llmClient, s.logger)
+	bankHandler := handler.NewBankHandler(bankRepo, userRepo, okraClient, monoClient, s.logger)
 	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, s.logger)
 
 	// Routes
@@ -129,6 +144,7 @@ func (s *Server) setupRoutes() {
 		walletHandler.RegisterRoutes(r)
 		transferHandler.RegisterRoutes(r)
 		chatHandler.RegisterRoutes(r)
+		bankHandler.RegisterRoutes(r)
 		webhookHandler.RegisterRoutes(r)
 	})
 }
