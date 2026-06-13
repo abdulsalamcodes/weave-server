@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/abdulsalamcodes/weave-server/internal/model"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 )
 
@@ -19,12 +20,26 @@ var (
 )
 
 type WalletService struct {
-	walletRepo *repository.WalletRepo
-	logger     *slog.Logger
+	walletRepo    *repository.WalletRepo
+	userRepo      *repository.UserRepo
+	paystack      *paystack.Client
+	paystackEnabled bool
+	logger        *slog.Logger
 }
 
-func NewWalletService(walletRepo *repository.WalletRepo, logger *slog.Logger) *WalletService {
-	return &WalletService{walletRepo: walletRepo, logger: logger}
+func NewWalletService(
+	walletRepo *repository.WalletRepo,
+	userRepo *repository.UserRepo,
+	paystackClient *paystack.Client,
+	logger *slog.Logger,
+) *WalletService {
+	return &WalletService{
+		walletRepo:    walletRepo,
+		userRepo:      userRepo,
+		paystack:      paystackClient,
+		paystackEnabled: paystackClient != nil,
+		logger:        logger,
+	}
 }
 
 func (s *WalletService) GetBalance(ctx context.Context, userID uuid.UUID) (*model.Wallet, error) {
@@ -143,9 +158,63 @@ func (s *WalletService) IssueWalletAccount(ctx context.Context, userID uuid.UUID
 		return existing, nil
 	}
 
-	// This would call Paystack DVA API in production
-	// For now, return a placeholder
-	return nil, errors.New("wallet account issuance not implemented - integrate Paystack DVA")
+	if !s.paystackEnabled {
+		return nil, errors.New("paystack not configured: set PAYSTACK_SECRET_KEY")
+	}
+
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+	if user == nil {
+		return nil, ErrUserNotFound
+	}
+
+	email := user.Email
+	if email == "" {
+		email = user.Phone + "@weave.ng"
+	}
+
+	// Create customer on Paystack
+	customer, err := s.paystack.CreateCustomer(ctx, &paystack.CreateCustomerRequest{
+		Email: email,
+		Phone: user.Phone,
+		Name:  user.FullName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create paystack customer: %w", err)
+	}
+
+	// Assign dedicated virtual account (Wema Bank)
+	dva, err := s.paystack.AssignDVA(ctx, customer.Data.CustomerCode, "wema")
+	if err != nil {
+		return nil, fmt.Errorf("assign dva: %w", err)
+	}
+
+	wa := &model.WalletAccount{
+		UserID:        userID,
+		Provider:      "paystack",
+		ProviderRef:   customer.Data.CustomerCode,
+		AccountNumber: dva.Data.AccountNumber,
+		AccountName:   dva.Data.AccountName,
+		BankName:      dva.Data.Bank.Name,
+		BankCode:      "",
+		IsActive:      true,
+		IsDefault:     true,
+	}
+
+	if err := s.walletRepo.CreateWalletAccount(ctx, wa); err != nil {
+		return nil, fmt.Errorf("save wallet account: %w", err)
+	}
+
+	s.logger.Info("wallet account issued",
+		"user_id", userID,
+		"account_number", wa.AccountNumber,
+		"bank", wa.BankName,
+		"provider", wa.Provider,
+	)
+
+	return wa, nil
 }
 
 func (s *WalletService) ProcessDepositWebhook(ctx context.Context, accountNumber string, amount model.Amount, fee model.Amount, provider, providerRef string) error {

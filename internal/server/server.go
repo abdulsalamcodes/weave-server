@@ -18,6 +18,7 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/config"
 	"github.com/abdulsalamcodes/weave-server/internal/handler"
 	"github.com/abdulsalamcodes/weave-server/internal/middleware"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
 )
@@ -87,6 +88,13 @@ func (s *Server) setupRoutes() {
 	txnRepo := repository.NewTransactionRepo(s.db)
 	bankRepo := repository.NewBankAccountRepo(s.db)
 
+	// External clients
+	var paystackClient *paystack.Client
+	if s.cfg.Paystack.SecretKey != "" {
+		paystackClient = paystack.NewClient(s.cfg.Paystack.SecretKey, s.cfg.Paystack.PublicKey)
+		s.logger.Info("paystack client initialized")
+	}
+
 	// Services
 	authService := service.NewAuthService(
 		userRepo, walletRepo,
@@ -94,7 +102,7 @@ func (s *Server) setupRoutes() {
 		s.cfg.JWT.AccessTTL, s.cfg.JWT.RefreshTTL,
 		s.logger,
 	)
-	walletService := service.NewWalletService(walletRepo, s.logger)
+	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.logger)
 	sourcingEngine := service.NewSourcingEngine(walletService, bankRepo, s.logger)
 	transferService := service.NewTransferService(txnRepo, walletRepo, walletService, sourcingEngine, s.logger)
 
@@ -104,7 +112,7 @@ func (s *Server) setupRoutes() {
 	walletHandler := handler.NewWalletHandler(walletService, s.logger)
 	transferHandler := handler.NewTransferHandler(transferService, s.logger)
 	chatHandler := handler.NewChatHandler(s.logger)
-	webhookHandler := handler.NewWebhookHandler(walletService, s.logger)
+	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, s.logger)
 
 	// Routes
 	s.router.Get("/health", healthHandler.HealthCheck)

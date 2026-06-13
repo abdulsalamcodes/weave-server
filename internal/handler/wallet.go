@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -10,6 +12,7 @@ import (
 
 	"github.com/abdulsalamcodes/weave-server/internal/middleware"
 	"github.com/abdulsalamcodes/weave-server/internal/model"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
 )
 
@@ -80,11 +83,16 @@ func (h *WalletHandler) IssueAccount(w http.ResponseWriter, r *http.Request) {
 // Webhook handler
 type WebhookHandler struct {
 	walletService *service.WalletService
+	paystack      *paystack.Client
 	logger        *slog.Logger
 }
 
-func NewWebhookHandler(walletService *service.WalletService, logger *slog.Logger) *WebhookHandler {
-	return &WebhookHandler{walletService: walletService, logger: logger}
+func NewWebhookHandler(walletService *service.WalletService, paystackClient *paystack.Client, logger *slog.Logger) *WebhookHandler {
+	return &WebhookHandler{
+		walletService: walletService,
+		paystack:      paystackClient,
+		logger:        logger,
+	}
 }
 
 func (h *WebhookHandler) RegisterRoutes(r chi.Router) {
@@ -106,6 +114,24 @@ type paystackWebhookPayload struct {
 }
 
 func (h *WebhookHandler) PaystackDeposit(w http.ResponseWriter, r *http.Request) {
+	if h.paystack != nil {
+		sig := r.Header.Get("x-paystack-signature")
+		if sig != "" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				respondError(w, http.StatusBadRequest, "invalid_body")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+
+			if !h.paystack.VerifyWebhook(sig, body) {
+				h.logger.Warn("invalid paystack webhook signature")
+				respondError(w, http.StatusUnauthorized, "invalid_signature")
+				return
+			}
+		}
+	}
+
 	var payload paystackWebhookPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		h.logger.Error("invalid webhook payload", "error", err)
