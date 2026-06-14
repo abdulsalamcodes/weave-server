@@ -8,17 +8,18 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig
-	Database DatabaseConfig
-	Redis    RedisConfig
-	JWT      JWTConfig
-	Auth     AuthConfig
-	Paystack PaystackConfig
-	Okra     OkraConfig
-	Mono     MonoConfig
-	LLM      LLMConfig
-	KYC      KYCConfig
+	Server    ServerConfig
+	Database  DatabaseConfig
+	Redis     RedisConfig
+	JWT       JWTConfig
+	Auth      AuthConfig
+	Paystack  PaystackConfig
+	Okra      OkraConfig
+	Mono      MonoConfig
+	LLM       LLMConfig
+	KYC       KYCConfig
 	Ratelimit RatelimitConfig
+	OTel      OTelConfig
 }
 
 type ServerConfig struct {
@@ -75,6 +76,13 @@ type KYCConfig struct {
 type RatelimitConfig struct {
 	Requests int
 	Window   time.Duration
+}
+
+type OTelConfig struct {
+	Enabled      bool
+	ServiceName  string
+	ServiceVersion string
+	OTLPEndpoint string
 }
 
 func Load() (*Config, error) {
@@ -163,6 +171,12 @@ func Load() (*Config, error) {
 		Ratelimit: RatelimitConfig{
 			Requests: rateLimitReqs,
 			Window:   rateLimitWindow,
+		},
+		OTel: OTelConfig{
+			Enabled:      env("OTEL_ENABLED", "false") == "true",
+			ServiceName:  env("OTEL_SERVICE_NAME", "weave-server"),
+			ServiceVersion: env("OTEL_SERVICE_VERSION", "1.0.0"),
+			OTLPEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 		},
 	}, nil
 }

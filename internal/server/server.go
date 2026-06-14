@@ -25,6 +25,7 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
 	"github.com/abdulsalamcodes/weave-server/pkg/idempotency"
+	"github.com/abdulsalamcodes/weave-server/pkg/telemetry"
 )
 
 type Server struct {
@@ -34,6 +35,8 @@ type Server struct {
 	logger *slog.Logger
 	router chi.Router
 	http   *http.Server
+
+	tpShutdown func()
 }
 
 func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, logger *slog.Logger) *Server {
@@ -45,14 +48,33 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, logger *slog.L
 		router: chi.NewRouter(),
 	}
 
+	s.initTracer()
 	s.setupMiddleware()
 	s.setupRoutes()
 
 	return s
 }
 
+func (s *Server) initTracer() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, shutdown, err := telemetry.InitTracer(ctx, telemetry.Config{
+		ServiceName:    s.cfg.OTel.ServiceName,
+		ServiceVersion: s.cfg.OTel.ServiceVersion,
+		OTLPEndpoint:   s.cfg.OTel.OTLPEndpoint,
+		Environment:    s.cfg.Server.Environment,
+		Enabled:        s.cfg.OTel.Enabled,
+	}, s.logger)
+	if err != nil {
+		s.logger.Error("failed to init tracer", "error", err)
+	}
+	s.tpShutdown = shutdown
+}
+
 func (s *Server) setupMiddleware() {
 	s.router.Use(chimw.RealIP)
+	s.router.Use(middleware.Tracing)
 	s.router.Use(middleware.RequireJSON)
 	s.router.Use(middleware.MaxBody)
 	s.router.Use(middleware.SecurityHeaders)
@@ -137,13 +159,13 @@ func (s *Server) setupRoutes() {
 	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.logger)
 	sourcingEngine := service.NewSourcingEngine(walletService, bankRepo, s.logger)
 	payoutService := service.NewPayoutService(paystackClient, s.logger)
-	transferService := service.NewTransferService(txnRepo, walletRepo, walletService, sourcingEngine, payoutService, s.db, s.logger)
+	transferService := service.NewTransferService(txnRepo, walletRepo, bankRepo, walletService, sourcingEngine, payoutService, monoClient, okraClient, s.db, s.logger)
 
 	// Handlers
 	healthHandler := handler.NewHealthHandler()
 	authHandler := handler.NewAuthHandler(authService, s.logger)
 	walletHandler := handler.NewWalletHandler(walletService, s.logger)
-	transferHandler := handler.NewTransferHandler(transferService, s.logger)
+	transferHandler := handler.NewTransferHandler(transferService, txnRepo, s.logger)
 	chatHandler := handler.NewChatHandler(transferService, walletService, authService, llmClient, s.logger)
 	bankHandler := handler.NewBankHandler(bankRepo, userRepo, okraClient, monoClient, s.logger)
 	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, s.logger)
@@ -185,6 +207,10 @@ func (s *Server) Start() error {
 
 	<-quit
 	s.logger.Info("shutting down server...")
+
+	if s.tpShutdown != nil {
+		s.tpShutdown()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

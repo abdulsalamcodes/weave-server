@@ -162,3 +162,40 @@ func (c *Client) VerifyWebhook(signature string, body []byte) bool {
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(signature), []byte(expected))
 }
+
+// --- Direct Debit ---
+
+type DirectDebitRequest struct {
+	Amount    float64 `json:"amount"`
+	Narration string  `json:"narration"`
+	Reference string  `json:"reference"`
+}
+
+type DirectDebitResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Data    struct {
+		ID              string `json:"id"`
+		Amount          int    `json:"amount"`
+		Status          string `json:"status"`
+		Reference       string `json:"reference"`
+		TransactionDate string `json:"transactionDate"`
+	} `json:"data"`
+}
+
+func (c *Client) DirectDebit(ctx context.Context, accountID string, req DirectDebitRequest) (*DirectDebitResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/accounts/"+accountID+"/direct-debit", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("mono-sec-key", c.secretKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	return parseResponse[DirectDebitResponse](resp, err)
+}

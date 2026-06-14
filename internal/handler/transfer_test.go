@@ -223,6 +223,37 @@ func (r *testTxnRepo) GetByIdempotencyKey(_ context.Context, key string) (*model
 	return nil, nil
 }
 
+func (r *testTxnRepo) ListByUserID(_ context.Context, userID uuid.UUID, filter repository.TransactionFilter) ([]model.Transaction, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var result []model.Transaction
+	for _, t := range r.txns {
+		if t.UserID != userID {
+			continue
+		}
+		result = append(result, *t)
+	}
+	if filter.Offset > 0 && filter.Offset < len(result) {
+		result = result[filter.Offset:]
+	}
+	if filter.Limit > 0 && filter.Limit < len(result) {
+		result = result[:filter.Limit]
+	}
+	return result, nil
+}
+
+func (r *testTxnRepo) CountByUserID(_ context.Context, userID uuid.UUID, _ repository.TransactionFilter) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, t := range r.txns {
+		if t.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 var _ repository.TransactionRepository = (*testTxnRepo)(nil)
 
 type testBankRepo struct {
@@ -262,7 +293,7 @@ func TestTransferHandler_Integration(t *testing.T) {
 	walletSvc := service.NewWalletService(walletRepo, userRepo, nil, newTestLogger())
 	engine := service.NewSourcingEngine(walletSvc, bankRepo, newTestLogger())
 	payoutSvc := service.NewPayoutService(nil, newTestLogger())
-	transferSvc := service.NewTransferService(txnRepo, walletRepo, walletSvc, engine, payoutSvc, nil, newTestLogger())
+	transferSvc := service.NewTransferService(txnRepo, walletRepo, bankRepo, walletSvc, engine, payoutSvc, nil, nil, nil, newTestLogger())
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
@@ -271,7 +302,7 @@ func TestTransferHandler_Integration(t *testing.T) {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	})
-	handler := NewTransferHandler(transferSvc, newTestLogger())
+	handler := NewTransferHandler(transferSvc, txnRepo, newTestLogger())
 	handler.RegisterRoutes(r)
 
 	server := httptest.NewServer(r)

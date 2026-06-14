@@ -49,6 +49,7 @@ func (h *BankHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/banks", h.ListBanks)
 	r.Put("/banks/{id}/priority", h.UpdatePriority)
 	r.Delete("/banks/{id}", h.UnlinkBank)
+	r.Post("/banks/{id}/refresh", h.RefreshBalance)
 }
 
 type initiateLinkRequest struct {
@@ -329,6 +330,81 @@ func (h *BankHandler) UnlinkBank(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *BankHandler) RefreshBalance(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_id")
+		return
+	}
+
+	bank, err := h.bankRepo.GetByID(r.Context(), id)
+	if err != nil {
+		h.logger.Error("get bank account failed", "error", err)
+		respondError(w, http.StatusInternalServerError, "lookup_failed")
+		return
+	}
+	if bank == nil || bank.UserID != userID {
+		respondError(w, http.StatusNotFound, "bank_account_not_found")
+		return
+	}
+
+	if bank.ProviderToken == "" {
+		respondError(w, http.StatusBadRequest, "no_provider_token")
+		return
+	}
+
+	var balance float64
+	switch bank.Provider {
+	case "mono":
+		if h.monoClient == nil {
+			respondError(w, http.StatusServiceUnavailable, "mono_not_configured")
+			return
+		}
+		resp, err := h.monoClient.GetBalance(r.Context(), bank.ProviderToken)
+		if err != nil {
+			h.logger.Error("mono balance refresh failed", "error", err, "account_id", bank.ID)
+			respondError(w, http.StatusInternalServerError, "balance_refresh_failed")
+			return
+		}
+		balance = resp.Data.Balance
+
+	case "okra":
+		if h.okraClient == nil {
+			respondError(w, http.StatusServiceUnavailable, "okra_not_configured")
+			return
+		}
+		resp, err := h.okraClient.GetBalance(r.Context(), bank.ProviderToken)
+		if err != nil {
+			h.logger.Error("okra balance refresh failed", "error", err, "account_id", bank.ID)
+			respondError(w, http.StatusInternalServerError, "balance_refresh_failed")
+			return
+		}
+		balance = resp.Data.Balance
+
+	default:
+		respondError(w, http.StatusBadRequest, "unsupported_provider")
+		return
+	}
+
+	if err := h.bankRepo.UpdateBalance(r.Context(), bank.ID, model.NewAmount(int64(balance))); err != nil {
+		h.logger.Error("update bank balance failed", "error", err)
+		respondError(w, http.StatusInternalServerError, "update_failed")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":       "refreshed",
+		"last_balance": model.NewAmount(int64(balance)),
+	})
 }
 
 // Compile-time check

@@ -372,6 +372,54 @@ func (m *mockTxnRepo) GetByIdempotencyKey(_ context.Context, key string) (*model
 	return t, nil
 }
 
+func (m *mockTxnRepo) ListByUserID(_ context.Context, userID uuid.UUID, filter repository.TransactionFilter) ([]model.Transaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []model.Transaction
+	for _, t := range m.txns {
+		if t.UserID != userID {
+			continue
+		}
+		if len(filter.Statuses) > 0 {
+			matched := false
+			for _, s := range filter.Statuses {
+				if t.Status == s {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		if len(filter.Types) > 0 {
+			matched := false
+			for _, tp := range filter.Types {
+				if t.Type == tp {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		result = append(result, *t)
+	}
+	if filter.Offset > 0 && filter.Offset < len(result) {
+		result = result[filter.Offset:]
+	}
+	if filter.Limit > 0 && filter.Limit < len(result) {
+		result = result[:filter.Limit]
+	}
+	return result, nil
+}
+
+func (m *mockTxnRepo) CountByUserID(ctx context.Context, userID uuid.UUID, filter repository.TransactionFilter) (int, error) {
+	txns, _ := m.ListByUserID(ctx, userID, filter)
+	return len(txns), nil
+}
+
 var _ repository.BankAccountRepository = (*mockBankRepo)(nil)
 
 type mockBankRepo struct {

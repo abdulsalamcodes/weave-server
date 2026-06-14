@@ -17,7 +17,7 @@ func TestTransferService_InitiateTransfer_WalletOnly(t *testing.T) {
 	walletSvc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
 	engine := NewSourcingEngine(walletSvc, bankRepo, newTestLogger())
 	payoutSvc := NewPayoutService(nil, newTestLogger())
-	svc := NewTransferService(txnRepo, walletRepo, walletSvc, engine, payoutSvc, nil, newTestLogger())
+	svc := NewTransferService(txnRepo, walletRepo, bankRepo, walletSvc, engine, payoutSvc, nil, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2349010000000", FullName: "Transfer Test", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 100000, LedgerBalance: 100000, Currency: "NGN"}
@@ -118,7 +118,7 @@ func TestTransferService_InitiateTransfer_InsufficientFunds(t *testing.T) {
 	walletSvc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
 	engine := NewSourcingEngine(walletSvc, bankRepo, newTestLogger())
 	payoutSvc := NewPayoutService(nil, newTestLogger())
-	svc := NewTransferService(txnRepo, walletRepo, walletSvc, engine, payoutSvc, nil, newTestLogger())
+	svc := NewTransferService(txnRepo, walletRepo, bankRepo, walletSvc, engine, payoutSvc, nil, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2349020000000", FullName: "Poor User", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 1000, LedgerBalance: 1000, Currency: "NGN"}
@@ -137,7 +137,7 @@ func TestTransferService_InitiateTransfer_InsufficientFunds(t *testing.T) {
 
 func TestTransferService_GetTransfer(t *testing.T) {
 	txnRepo := newMockTxnRepo()
-	svc := NewTransferService(txnRepo, newMockWalletRepo(), nil, nil, nil, nil, newTestLogger())
+	svc := NewTransferService(txnRepo, newMockWalletRepo(), newMockBankRepo(), nil, nil, nil, nil, nil, nil, newTestLogger())
 
 	parent, _ := txnRepo.Create(context.Background(), model.CreateTransactionInput{
 		Amount:   10000,

@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/abdulsalamcodes/weave-server/internal/model"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/mono"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/okra"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 )
 
@@ -23,9 +25,12 @@ var (
 type TransferService struct {
 	txnRepo       repository.TransactionRepository
 	walletRepo    repository.WalletRepository
+	bankRepo      repository.BankAccountRepository
 	walletService *WalletService
 	sourcingEng   *SourcingEngine
 	payoutService *PayoutService
+	monoClient    *mono.Client
+	okraClient    *okra.Client
 	pool          *pgxpool.Pool
 	logger        *slog.Logger
 }
@@ -33,18 +38,24 @@ type TransferService struct {
 func NewTransferService(
 	txnRepo repository.TransactionRepository,
 	walletRepo repository.WalletRepository,
+	bankRepo repository.BankAccountRepository,
 	walletService *WalletService,
 	sourcingEng *SourcingEngine,
 	payoutService *PayoutService,
+	monoClient *mono.Client,
+	okraClient *okra.Client,
 	pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) *TransferService {
 	return &TransferService{
 		txnRepo:       txnRepo,
 		walletRepo:    walletRepo,
+		bankRepo:      bankRepo,
 		walletService: walletService,
 		sourcingEng:   sourcingEng,
 		payoutService: payoutService,
+		monoClient:    monoClient,
+		okraClient:    okraClient,
 		pool:          pool,
 		logger:        logger,
 	}
@@ -128,9 +139,10 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 		return nil, fmt.Errorf("create parent transaction: %w", err)
 	}
 
-	// Process wallet leg (if present)
+	// Process all debit legs
 	for _, leg := range plan.Legs {
-		if leg.Source == "wallet" {
+		switch {
+		case leg.Source == "wallet":
 			wallet, err := s.walletRepo.GetByUserID(ctx, userID)
 			if err != nil {
 				return nil, fmt.Errorf("get wallet: %w", err)
@@ -141,12 +153,10 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 
 			legRef := fmt.Sprintf("%s-WL", ourRef)
 
-			// Hold funds
 			if err := s.walletRepo.Hold(ctx, wallet.ID, leg.Amount+leg.Fee); err != nil {
 				return nil, fmt.Errorf("hold wallet funds: %w", err)
 			}
 
-			// Create debit leg transaction
 			_, err = s.txnRepo.Create(ctx, model.CreateTransactionInput{
 				UserID:   userID,
 				ParentID: &parentTxn.ID,
@@ -161,7 +171,41 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 				if rhErr := s.walletRepo.ReleaseHold(ctx, wallet.ID, leg.Amount+leg.Fee); rhErr != nil {
 					s.logger.Error("release hold failed", "error", rhErr, "wallet_id", wallet.ID)
 				}
-				return nil, fmt.Errorf("create debit leg: %w", err)
+				return nil, fmt.Errorf("create wallet debit leg: %w", err)
+			}
+
+		default:
+			// Bank account leg — Source is bank account UUID
+			bankID, err := uuid.Parse(leg.Source)
+			if err != nil {
+				return nil, fmt.Errorf("invalid bank source: %w", err)
+			}
+			bank, err := s.bankRepo.GetByID(ctx, bankID)
+			if err != nil {
+				return nil, fmt.Errorf("get bank account: %w", err)
+			}
+			if bank == nil {
+				return nil, fmt.Errorf("bank account %s not found", leg.Source)
+			}
+
+			legRef := fmt.Sprintf("%s-BA-%s", ourRef, bank.ID.String()[:8])
+
+			_, err = s.txnRepo.Create(ctx, model.CreateTransactionInput{
+				UserID:   userID,
+				ParentID: &parentTxn.ID,
+				Type:     model.TxnTypeDebitLeg,
+				Amount:   leg.Amount,
+				Fee:      leg.Fee,
+				Currency: "NGN",
+				SourceProvider: bank.Provider,
+				OurRef:   legRef,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("create bank debit leg: %w", err)
+			}
+
+			if err := s.executeBankDebit(ctx, bank, leg, legRef); err != nil {
+				return nil, fmt.Errorf("execute bank debit: %w", err)
 			}
 		}
 	}
@@ -276,4 +320,46 @@ func (s *TransferService) GetTransferByRef(ctx context.Context, ourRef string) (
 		return nil, ErrTransferNotFound
 	}
 	return txn, nil
+}
+
+func (s *TransferService) executeBankDebit(ctx context.Context, bank *model.BankAccount, leg model.DebitLeg, legRef string) error {
+	if bank.ProviderToken == "" {
+		return fmt.Errorf("bank account %s has no provider token", bank.ID)
+	}
+
+	switch bank.Provider {
+	case "mono":
+		if s.monoClient == nil {
+			return fmt.Errorf("mono client not configured")
+		}
+		_, err := s.monoClient.DirectDebit(ctx, bank.ProviderToken, mono.DirectDebitRequest{
+			Amount:    leg.Amount.NGN(),
+			Narration: fmt.Sprintf("Weave transfer %s", legRef),
+			Reference: legRef,
+		})
+		if err != nil {
+			return fmt.Errorf("mono direct debit failed: %w", err)
+		}
+		return nil
+
+	case "okra":
+		if s.okraClient == nil {
+			return fmt.Errorf("okra client not configured")
+		}
+		_, err := s.okraClient.InitiatePayment(ctx, &okra.PaymentRequest{
+			Amount:          leg.Amount.NGN(),
+			AccountID:       bank.ProviderToken,
+			RecipientAccount: bank.AccountNumber,
+			RecipientBank:   bank.BankCode,
+			Narration:       fmt.Sprintf("Weave transfer %s", legRef),
+			Reference:       legRef,
+		})
+		if err != nil {
+			return fmt.Errorf("okra payment failed: %w", err)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unsupported provider: %s", bank.Provider)
+	}
 }

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -175,4 +176,87 @@ func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (
 		return nil, fmt.Errorf("get transaction by idempotency key: %w", err)
 	}
 	return txn, nil
+}
+
+const selectColumns = `id, user_id, parent_id, type, amount, fee, currency, status,
+	source_account_id, COALESCE(source_provider, ''),
+	COALESCE(recipient_account, ''), COALESCE(recipient_bank_code, ''),
+	COALESCE(recipient_name, ''), COALESCE(provider_ref, ''),
+	our_ref, COALESCE(idempotency_key, ''),
+	COALESCE(failure_reason, ''), created_at, completed_at`
+
+func (r *TransactionRepo) buildFilterWhere(filter TransactionFilter) (string, []any) {
+	var clauses []string
+	var args []any
+	n := 1
+
+	if len(filter.Statuses) > 0 {
+		placeholders := make([]string, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			placeholders[i] = fmt.Sprintf("$%d", n)
+			args = append(args, s)
+			n++
+		}
+		clauses = append(clauses, fmt.Sprintf("status IN (%s)", strings.Join(placeholders, ",")))
+	}
+	if len(filter.Types) > 0 {
+		placeholders := make([]string, len(filter.Types))
+		for i, t := range filter.Types {
+			placeholders[i] = fmt.Sprintf("$%d", n)
+			args = append(args, t)
+			n++
+		}
+		clauses = append(clauses, fmt.Sprintf("type IN (%s)", strings.Join(placeholders, ",")))
+	}
+	if !filter.From.IsZero() {
+		clauses = append(clauses, fmt.Sprintf("created_at >= $%d", n))
+		args = append(args, filter.From)
+		n++
+	}
+	if !filter.To.IsZero() {
+		clauses = append(clauses, fmt.Sprintf("created_at <= $%d", n))
+		args = append(args, filter.To)
+		n++
+	}
+
+	where := ""
+	if len(clauses) > 0 {
+		where = " AND " + strings.Join(clauses, " AND ")
+	}
+	return where, args
+}
+
+func (r *TransactionRepo) ListByUserID(ctx context.Context, userID uuid.UUID, filter TransactionFilter) ([]model.Transaction, error) {
+	where, args := r.buildFilterWhere(filter)
+	query := fmt.Sprintf(`SELECT %s FROM transactions WHERE user_id = $%d%s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
+		selectColumns, len(args)+1, where, len(args)+2, len(args)+3)
+	allArgs := append(args, userID, filter.Limit, filter.Offset)
+
+	rows, err := getQuerier(ctx, r.pool).Query(ctx, query, allArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("list transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var txns []model.Transaction
+	for rows.Next() {
+		t, err := scanTransaction(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan transaction: %w", err)
+		}
+		txns = append(txns, *t)
+	}
+	return txns, nil
+}
+
+func (r *TransactionRepo) CountByUserID(ctx context.Context, userID uuid.UUID, filter TransactionFilter) (int, error) {
+	where, args := r.buildFilterWhere(filter)
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM transactions WHERE user_id = $%d%s`, len(args)+1, where)
+	allArgs := append(args, userID)
+
+	var count int
+	if err := getQuerier(ctx, r.pool).QueryRow(ctx, query, allArgs...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count transactions: %w", err)
+	}
+	return count, nil
 }

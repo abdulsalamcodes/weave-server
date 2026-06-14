@@ -1,0 +1,817 @@
+openapi: "3.0.3"
+info:
+  title: Weave API
+  description: Chat-based multi-bank money transfer agent API
+  version: "1.0.0"
+
+servers:
+  - url: https://api.weave.io
+    description: Production
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: weave-server
+
+  /api/v1/auth/register:
+    post:
+      summary: Register a new user
+      operationId: registerUser
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, full_name, pin]
+              properties:
+                phone:
+                  type: string
+                  example: "+2348012345678"
+                full_name:
+                  type: string
+                  example: "John Doe"
+                pin:
+                  type: string
+                  description: 6-digit PIN
+                  example: "123456"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSession"
+        "409":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/auth/login:
+    post:
+      summary: Login with phone and PIN
+      operationId: login
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, pin]
+              properties:
+                phone:
+                  type: string
+                  example: "+2348012345678"
+                pin:
+                  type: string
+                  example: "123456"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSession"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/auth/pin/verify:
+    post:
+      summary: Verify PIN for sensitive actions
+      operationId: verifyPIN
+      tags: [Auth]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                pin:
+                  type: string
+                  example: "123456"
+      responses:
+        "200":
+          description: PIN verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: verified
+        "401":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/auth/token/refresh:
+    post:
+      summary: Refresh access token
+      operationId: refreshToken
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        "200":
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSession"
+        "401":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/wallet:
+    get:
+      summary: Get wallet details
+      operationId: getWallet
+      tags: [Wallet]
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Wallet details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Wallet"
+
+  /api/v1/wallet/account:
+    post:
+      summary: Issue virtual bank account
+      operationId: issueAccount
+      tags: [Wallet]
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Account issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletAccount"
+
+  /api/v1/transfers:
+    post:
+      summary: Initiate a transfer
+      operationId: initiateTransfer
+      tags: [Transfers]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, recipient_account, recipient_bank, recipient_name]
+              properties:
+                amount:
+                  type: number
+                  description: Amount in NGN (will be converted to kobo)
+                  example: 5000
+                recipient_account:
+                  type: string
+                  example: "0123456789"
+                recipient_bank:
+                  type: string
+                  description: Bank code
+                  example: "058"
+                recipient_name:
+                  type: string
+                  example: "Jane Doe"
+                narration:
+                  type: string
+                  example: "For dinner"
+      responses:
+        "201":
+          description: Transfer initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_id:
+                    type: string
+                    format: uuid
+                  our_ref:
+                    type: string
+                  status:
+                    type: string
+                  debit_plan:
+                    $ref: "#/components/schemas/DebitPlan"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+
+    get:
+      summary: List transaction history
+      operationId: listTransactions
+      tags: [Transfers]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, PROCESSING, COMPLETED, FAILED, REFUNDED]
+          description: Filter by status
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [debit_leg, payout_leg, deposit, fee, refund, hold, release]
+          description: Filter by transaction type
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start date (RFC3339)
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: End date (RFC3339)
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated transaction list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Transaction"
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+
+  /api/v1/transfers/{id}:
+    get:
+      summary: Get transfer by ID
+      operationId: getTransfer
+      tags: [Transfers]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Transfer details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        "404":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/transfers/ref/{ref}:
+    get:
+      summary: Get transfer by reference
+      operationId: getTransferByRef
+      tags: [Transfers]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Transfer details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        "404":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/banks/link:
+    post:
+      summary: Initiate bank account linking
+      operationId: initiateLink
+      tags: [Banks]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider]
+              properties:
+                provider:
+                  type: string
+                  enum: [okra, mono]
+      responses:
+        "200":
+          description: Link URL generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connect_url:
+                    type: string
+                  reference:
+                    type: string
+                  provider:
+                    type: string
+        "503":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/banks/webhook/okra:
+    post:
+      summary: Okra account-linking webhook
+      operationId: okraWebhook
+      tags: [Banks]
+      responses:
+        "200":
+          description: Account linked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        "401":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/banks/webhook/mono:
+    post:
+      summary: Mono account-linking webhook
+      operationId: monoWebhook
+      tags: [Banks]
+      responses:
+        "200":
+          description: Account linked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        "401":
+          $ref: "#/components/responses/APIError"
+
+  /api/v1/banks:
+    get:
+      summary: List linked bank accounts
+      operationId: listBanks
+      tags: [Banks]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: Linked bank accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BankAccount"
+
+  /api/v1/banks/{id}/priority:
+    put:
+      summary: Update bank account priority
+      operationId: updatePriority
+      tags: [Banks]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [priority]
+              properties:
+                priority:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+      responses:
+        "200":
+          description: Priority updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: updated
+
+  /api/v1/banks/{id}:
+    delete:
+      summary: Unlink a bank account
+      operationId: unlinkBank
+      tags: [Banks]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Account unlinked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: deleted
+
+  /api/v1/banks/{id}/refresh:
+    post:
+      summary: Refresh bank account balance from provider
+      operationId: refreshBalance
+      tags: [Banks]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Balance refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: refreshed
+                  last_balance:
+                    type: integer
+                    description: Balance in kobo
+
+  /api/v1/chat/message:
+    post:
+      summary: Send a chat message for NLP intent processing
+      operationId: chatMessage
+      tags: [Chat]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  example: "send 5000 to 0123456789"
+      responses:
+        "200":
+          description: Intent parsed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  response:
+                    type: string
+                  intent:
+                    type: string
+                  data:
+                    type: object
+
+  /api/v1/chat/confirm:
+    post:
+      summary: Confirm an AI-generated transfer intent
+      operationId: confirmTransfer
+      tags: [Chat]
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Confirmation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_implemented
+
+  /api/v1/webhook/paystack:
+    post:
+      summary: Paystack deposit webhook
+      operationId: paystackWebhook
+      tags: [Webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Webhook processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    APIError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    UserSession:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    Wallet:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        balance:
+          type: integer
+          description: Balance in kobo
+        ledger_balance:
+          type: integer
+          description: Available balance in kobo (balance minus holds)
+        currency:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WalletAccount:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+        provider_ref:
+          type: string
+        account_number:
+          type: string
+        account_name:
+          type: string
+        bank_name:
+          type: string
+        bank_code:
+          type: string
+        is_active:
+          type: boolean
+        is_default:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+        type:
+          type: string
+          enum: [debit_leg, payout_leg, deposit, fee, refund, hold, release]
+        amount:
+          type: integer
+          description: Amount in kobo
+        fee:
+          type: integer
+          description: Fee in kobo
+        currency:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, COMPLETED, FAILED, REFUNDED]
+        source_provider:
+          type: string
+        recipient_account:
+          type: string
+        recipient_bank_code:
+          type: string
+        recipient_name:
+          type: string
+        provider_ref:
+          type: string
+        our_ref:
+          type: string
+        failure_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BankAccount:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          enum: [okra, mono]
+        account_number:
+          type: string
+        account_name:
+          type: string
+        bank_code:
+          type: string
+        bank_name:
+          type: string
+        priority:
+          type: integer
+        min_balance:
+          type: integer
+          description: Cushion balance in kobo
+        last_balance:
+          type: integer
+          description: Last known balance in kobo
+        is_active:
+          type: boolean
+        is_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DebitPlan:
+      type: object
+      properties:
+        total:
+          type: integer
+          description: Total amount in kobo
+        fees:
+          type: integer
+          description: Total fees in kobo
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/DebitLeg"
+
+    DebitLeg:
+      type: object
+      properties:
+        source:
+          type: string
+          description: "wallet or bank account UUID"
+        amount:
+          type: integer
+          description: Amount in kobo
+        fee:
+          type: integer
+          description: Fee in kobo
+        bank_name:
+          type: string
+
+  responses:
+    APIError:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"

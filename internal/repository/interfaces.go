@@ -35,6 +35,16 @@ type WalletRepository interface {
 	RecordDeposit(ctx context.Context, deposit *model.WalletDeposit) error
 }
 
+// TransactionFilter specifies optional filters for listing transactions.
+type TransactionFilter struct {
+	Statuses []model.TransactionStatus
+	Types    []model.TransactionType
+	From     time.Time
+	To       time.Time
+	Limit    int
+	Offset   int
+}
+
 type TransactionRepository interface {
 	Create(ctx context.Context, input model.CreateTransactionInput) (*model.Transaction, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*model.Transaction, error)
@@ -43,6 +53,8 @@ type TransactionRepository interface {
 	UpdateStatus(ctx context.Context, id uuid.UUID, status model.TransactionStatus, failureReason string) error
 	UpdateProviderRef(ctx context.Context, id uuid.UUID, providerRef string) error
 	GetByIdempotencyKey(ctx context.Context, key string) (*model.Transaction, error)
+	ListByUserID(ctx context.Context, userID uuid.UUID, filter TransactionFilter) ([]model.Transaction, error)
+	CountByUserID(ctx context.Context, userID uuid.UUID, filter TransactionFilter) (int, error)
 }
 
 type BankAccountRepository interface {

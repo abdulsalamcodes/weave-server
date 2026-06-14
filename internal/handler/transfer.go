@@ -5,26 +5,30 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/abdulsalamcodes/weave-server/internal/middleware"
 	"github.com/abdulsalamcodes/weave-server/internal/model"
+	"github.com/abdulsalamcodes/weave-server/internal/repository"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
 )
 
 type TransferHandler struct {
 	transferService *service.TransferService
+	txnRepo         repository.TransactionRepository
 	logger          *slog.Logger
 }
 
-func NewTransferHandler(transferService *service.TransferService, logger *slog.Logger) *TransferHandler {
-	return &TransferHandler{transferService: transferService, logger: logger}
+func NewTransferHandler(transferService *service.TransferService, txnRepo repository.TransactionRepository, logger *slog.Logger) *TransferHandler {
+	return &TransferHandler{transferService: transferService, txnRepo: txnRepo, logger: logger}
 }
 
 func (h *TransferHandler) RegisterRoutes(r chi.Router) {
 	r.Post("/transfers", h.InitiateTransfer)
+	r.Get("/transfers", h.ListTransactions)
 	r.Get("/transfers/{id}", h.GetTransfer)
 	r.Get("/transfers/ref/{ref}", h.GetTransferByRef)
 }
@@ -122,4 +126,62 @@ func (h *TransferHandler) GetTransferByRef(w http.ResponseWriter, r *http.Reques
 	}
 
 	respondJSON(w, http.StatusOK, txn)
+}
+
+func (h *TransferHandler) ListTransactions(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	q := r.URL.Query()
+	page, perPage := parsePagination(r, 1, 20)
+
+	filter := repository.TransactionFilter{
+		Limit:  perPage,
+		Offset: (page - 1) * perPage,
+	}
+
+	if s := q.Get("status"); s != "" {
+		filter.Statuses = []model.TransactionStatus{model.TransactionStatus(s)}
+	}
+	if t := q.Get("type"); t != "" {
+		filter.Types = []model.TransactionType{model.TransactionType(t)}
+	}
+	if from := q.Get("from"); from != "" {
+		if t, err := time.Parse(time.RFC3339, from); err == nil {
+			filter.From = t
+		}
+	}
+	if to := q.Get("to"); to != "" {
+		if t, err := time.Parse(time.RFC3339, to); err == nil {
+			filter.To = t
+		}
+	}
+
+	txns, err := h.txnRepo.ListByUserID(r.Context(), userID, filter)
+	if err != nil {
+		h.logger.Error("list transactions failed", "error", err)
+		respondError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+
+	total, err := h.txnRepo.CountByUserID(r.Context(), userID, filter)
+	if err != nil {
+		h.logger.Error("count transactions failed", "error", err)
+		respondError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+
+	if txns == nil {
+		txns = []model.Transaction{}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"data":       txns,
+		"total":      total,
+		"page":       page,
+		"per_page":   perPage,
+	})
 }
