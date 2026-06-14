@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/abdulsalamcodes/weave-server/internal/model"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
@@ -20,20 +21,22 @@ var (
 )
 
 type TransferService struct {
-	txnRepo       *repository.TransactionRepo
-	walletRepo    *repository.WalletRepo
+	txnRepo       repository.TransactionRepository
+	walletRepo    repository.WalletRepository
 	walletService *WalletService
 	sourcingEng   *SourcingEngine
 	payoutService *PayoutService
+	pool          *pgxpool.Pool
 	logger        *slog.Logger
 }
 
 func NewTransferService(
-	txnRepo *repository.TransactionRepo,
-	walletRepo *repository.WalletRepo,
+	txnRepo repository.TransactionRepository,
+	walletRepo repository.WalletRepository,
 	walletService *WalletService,
 	sourcingEng *SourcingEngine,
 	payoutService *PayoutService,
+	pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) *TransferService {
 	return &TransferService{
@@ -42,6 +45,7 @@ func NewTransferService(
 		walletService: walletService,
 		sourcingEng:   sourcingEng,
 		payoutService: payoutService,
+		pool:          pool,
 		logger:        logger,
 	}
 }
@@ -61,7 +65,7 @@ type TransferResult struct {
 	DebitPlan     *model.DebitPlan
 }
 
-func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID, req TransferRequest) (*TransferResult, error) {
+func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID, req TransferRequest) (res *TransferResult, err error) {
 	// Check idempotency
 	if req.IdempotencyKey != "" {
 		existing, err := s.txnRepo.GetByIdempotencyKey(ctx, req.IdempotencyKey)
@@ -81,6 +85,28 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 	plan, err := s.sourcingEng.BuildDebitPlan(ctx, userID, req.Amount)
 	if err != nil {
 		return nil, fmt.Errorf("build debit plan: %w", err)
+	}
+
+	if s.pool != nil {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin transaction: %w", err)
+		}
+		defer func() {
+			if err != nil {
+				if rbErr := tx.Rollback(ctx); rbErr != nil {
+					s.logger.Error("tx rollback failed", "error", rbErr)
+				}
+			}
+		}()
+		ctx = repository.WithTx(ctx, tx)
+		defer func() {
+			if err == nil {
+				if cErr := tx.Commit(ctx); cErr != nil {
+					err = fmt.Errorf("commit transaction: %w", cErr)
+				}
+			}
+		}()
 	}
 
 	ourRef := fmt.Sprintf("WVF-%s", uuid.New().String()[:8])
@@ -132,8 +158,9 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 				OurRef:   legRef,
 			})
 			if err != nil {
-				// Release hold on failure
-				s.walletRepo.ReleaseHold(ctx, wallet.ID, leg.Amount+leg.Fee)
+				if rhErr := s.walletRepo.ReleaseHold(ctx, wallet.ID, leg.Amount+leg.Fee); rhErr != nil {
+					s.logger.Error("release hold failed", "error", rhErr, "wallet_id", wallet.ID)
+				}
 				return nil, fmt.Errorf("create debit leg: %w", err)
 			}
 		}
@@ -174,11 +201,13 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 			s.txnRepo.UpdateStatus(ctx, payoutTxn.ID, model.TxnStatusFailed, err.Error())
 			s.txnRepo.UpdateStatus(ctx, parentTxn.ID, model.TxnStatusFailed, "payout failed")
 
-			// Release holds
+			// Release holds (within tx — rolled back anyway, but keeps data consistent)
 			for _, leg := range plan.Legs {
 				if leg.Source == "wallet" {
 					if wallet, _ := s.walletRepo.GetByUserID(ctx, userID); wallet != nil {
-						s.walletRepo.ReleaseHold(ctx, wallet.ID, leg.Amount+leg.Fee)
+						if rhErr := s.walletRepo.ReleaseHold(ctx, wallet.ID, leg.Amount+leg.Fee); rhErr != nil {
+							s.logger.Error("release hold on payout failure", "error", rhErr, "wallet_id", wallet.ID)
+						}
 					}
 				}
 			}

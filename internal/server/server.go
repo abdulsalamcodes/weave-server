@@ -24,6 +24,7 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
+	"github.com/abdulsalamcodes/weave-server/pkg/idempotency"
 )
 
 type Server struct {
@@ -52,6 +53,8 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, logger *slog.L
 
 func (s *Server) setupMiddleware() {
 	s.router.Use(chimw.RealIP)
+	s.router.Use(middleware.RequireJSON)
+	s.router.Use(middleware.MaxBody)
 	s.router.Use(middleware.SecurityHeaders)
 	s.router.Use(middleware.RequestID)
 	s.router.Use(middleware.Recovery(s.logger))
@@ -64,8 +67,15 @@ func (s *Server) setupMiddleware() {
 	)
 	s.router.Use(middleware.RateLimit(rateLimiter, s.logger))
 
-	// Idempotency store
-	idempotencyStore := middleware.NewInMemoryIDKeyStore(24 * time.Hour)
+	// Idempotency store — use Redis when available, fall back to in-memory
+	var idempotencyStore middleware.IDKeyStore
+	if s.rdb != nil {
+		idempotencyStore = &redisIDKeyStore{store: idempotency.NewStore(s.rdb, 24*time.Hour)}
+		s.logger.Info("using redis idempotency store")
+	} else {
+		idempotencyStore = middleware.NewInMemoryIDKeyStore(24 * time.Hour)
+		s.logger.Warn("redis unavailable, using in-memory idempotency store")
+	}
 	s.router.Use(middleware.Idempotency(idempotencyStore, s.logger))
 
 	// Auth middleware
@@ -121,12 +131,13 @@ func (s *Server) setupRoutes() {
 		userRepo, walletRepo,
 		s.cfg.Auth, s.cfg.JWT.Secret,
 		s.cfg.JWT.AccessTTL, s.cfg.JWT.RefreshTTL,
+		s.db,
 		s.logger,
 	)
 	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.logger)
 	sourcingEngine := service.NewSourcingEngine(walletService, bankRepo, s.logger)
 	payoutService := service.NewPayoutService(paystackClient, s.logger)
-	transferService := service.NewTransferService(txnRepo, walletRepo, walletService, sourcingEngine, payoutService, s.logger)
+	transferService := service.NewTransferService(txnRepo, walletRepo, walletService, sourcingEngine, payoutService, s.db, s.logger)
 
 	// Handlers
 	healthHandler := handler.NewHealthHandler()
@@ -184,4 +195,21 @@ func (s *Server) Start() error {
 
 	s.logger.Info("server stopped gracefully")
 	return nil
+}
+
+// redisIDKeyStore adapts pkg/idempotency.Store to middleware.IDKeyStore.
+type redisIDKeyStore struct {
+	store *idempotency.Store
+}
+
+func (a *redisIDKeyStore) Get(ctx context.Context, namespace, key string) (*middleware.IDKeyResponse, bool, error) {
+	resp, found, err := a.store.Get(ctx, namespace, key)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	return &middleware.IDKeyResponse{Status: resp.Status, Body: resp.Body}, true, nil
+}
+
+func (a *redisIDKeyStore) Set(ctx context.Context, namespace, key string, resp *middleware.IDKeyResponse) error {
+	return a.store.Set(ctx, namespace, key, &idempotency.Response{Status: resp.Status, Body: resp.Body})
 }

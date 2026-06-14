@@ -20,7 +20,7 @@ func NewBankAccountRepo(pool *pgxpool.Pool) *BankAccountRepo {
 }
 
 func (r *BankAccountRepo) Create(ctx context.Context, ba *model.BankAccount) error {
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO bank_accounts (user_id, provider, provider_token, account_number,
 		                           account_name, bank_code, bank_name, priority, min_balance)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -34,15 +34,16 @@ func (r *BankAccountRepo) Create(ctx context.Context, ba *model.BankAccount) err
 	return nil
 }
 
-func (r *BankAccountRepo) GetByUserID(ctx context.Context, userID uuid.UUID) ([]model.BankAccount, error) {
-	rows, err := r.pool.Query(ctx, `
+func (r *BankAccountRepo) GetByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]model.BankAccount, error) {
+	rows, err := getQuerier(ctx, r.pool).Query(ctx, `
 		SELECT id, user_id, provider, account_number, account_name,
 		       bank_code, bank_name, priority, min_balance,
 		       COALESCE(last_balance, 0), is_active, is_verified,
 		       created_at, updated_at
 		FROM bank_accounts WHERE user_id = $1
 		ORDER BY priority ASC, created_at ASC
-	`, userID)
+		LIMIT $2 OFFSET $3
+	`, userID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("get bank accounts: %w", err)
 	}
@@ -67,7 +68,7 @@ func (r *BankAccountRepo) GetByUserID(ctx context.Context, userID uuid.UUID) ([]
 
 func (r *BankAccountRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.BankAccount, error) {
 	a := &model.BankAccount{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, user_id, provider, account_number, account_name,
 		       bank_code, bank_name, priority, min_balance,
 		       COALESCE(last_balance, 0), is_active, is_verified,
@@ -89,7 +90,7 @@ func (r *BankAccountRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Ban
 }
 
 func (r *BankAccountRepo) UpdatePriority(ctx context.Context, id uuid.UUID, priority int) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE bank_accounts SET priority = $2, updated_at = NOW() WHERE id = $1
 	`, id, priority)
 	if err != nil {
@@ -99,7 +100,7 @@ func (r *BankAccountRepo) UpdatePriority(ctx context.Context, id uuid.UUID, prio
 }
 
 func (r *BankAccountRepo) UpdateBalance(ctx context.Context, id uuid.UUID, balance model.Amount) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE bank_accounts SET last_balance = $2, last_balance_fetched_at = NOW(), updated_at = NOW()
 		WHERE id = $1
 	`, id, balance)
@@ -110,7 +111,7 @@ func (r *BankAccountRepo) UpdateBalance(ctx context.Context, id uuid.UUID, balan
 }
 
 func (r *BankAccountRepo) Delete(ctx context.Context, id uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `DELETE FROM bank_accounts WHERE id = $1`, id)
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `DELETE FROM bank_accounts WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete bank account: %w", err)
 	}

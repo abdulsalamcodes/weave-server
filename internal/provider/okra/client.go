@@ -3,6 +3,9 @@ package okra
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -188,4 +191,14 @@ var supportedEvents = map[string]bool{
 
 func IsSupportedEvent(event string) bool {
 	return supportedEvents[event]
+}
+
+// VerifyWebhook verifies Okra webhook HMAC-SHA256 signature.
+// Okra signs webhooks with HMAC-SHA256 using the client secret.
+// The signature is in the "X-Okra-Signature" header as a hex-encoded string.
+func (c *Client) VerifyWebhook(signature string, body []byte) bool {
+	mac := hmac.New(sha256.New, []byte(c.secret))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(signature), []byte(expected))
 }

@@ -16,7 +16,7 @@ func Recovery(logger *slog.Logger) func(http.Handler) http.Handler {
 						slog.String("stack", string(debug.Stack())),
 						slog.String("request_id", GetRequestID(r.Context())),
 					)
-					http.Error(w, `{"error":"internal_server_error"}`, http.StatusInternalServerError)
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_server_error"})
 				}
 			}()
 			next.ServeHTTP(w, r)

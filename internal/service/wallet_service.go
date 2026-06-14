@@ -20,16 +20,16 @@ var (
 )
 
 type WalletService struct {
-	walletRepo    *repository.WalletRepo
-	userRepo      *repository.UserRepo
-	paystack      *paystack.Client
+	walletRepo     repository.WalletRepository
+	userRepo       repository.UserRepository
+	paystack       *paystack.Client
 	paystackEnabled bool
-	logger        *slog.Logger
+	logger         *slog.Logger
 }
 
 func NewWalletService(
-	walletRepo *repository.WalletRepo,
-	userRepo *repository.UserRepo,
+	walletRepo repository.WalletRepository,
+	userRepo repository.UserRepository,
 	paystackClient *paystack.Client,
 	logger *slog.Logger,
 ) *WalletService {
@@ -267,21 +267,28 @@ func (s *WalletService) ProcessDepositWebhook(ctx context.Context, accountNumber
 	return nil
 }
 
+// WalletBalanceProvider is the interface SourcingEngine needs from WalletService.
+type WalletBalanceProvider interface {
+	GetBalance(ctx context.Context, userID uuid.UUID) (*model.Wallet, error)
+}
+
+var _ WalletBalanceProvider = (*WalletService)(nil)
+
 type SourcingEngine struct {
-	walletService *WalletService
-	bankRepo      *repository.BankAccountRepo
-	logger        *slog.Logger
+	walletSvc WalletBalanceProvider
+	bankRepo  repository.BankAccountRepository
+	logger    *slog.Logger
 }
 
 func NewSourcingEngine(
-	walletService *WalletService,
-	bankRepo *repository.BankAccountRepo,
+	walletSvc WalletBalanceProvider,
+	bankRepo repository.BankAccountRepository,
 	logger *slog.Logger,
 ) *SourcingEngine {
 	return &SourcingEngine{
-		walletService: walletService,
-		bankRepo:      bankRepo,
-		logger:        logger,
+		walletSvc: walletSvc,
+		bankRepo:  bankRepo,
+		logger:    logger,
 	}
 }
 
@@ -289,7 +296,7 @@ func (e *SourcingEngine) BuildDebitPlan(ctx context.Context, userID uuid.UUID, a
 	plan := &model.DebitPlan{}
 
 	// 1. Check wallet balance first (wallet is always highest priority)
-	wallet, err := e.walletService.GetBalance(ctx, userID)
+	wallet, err := e.walletSvc.GetBalance(ctx, userID)
 	if err != nil && err != ErrWalletNotFound {
 		return nil, fmt.Errorf("get wallet: %w", err)
 	}
@@ -316,7 +323,7 @@ func (e *SourcingEngine) BuildDebitPlan(ctx context.Context, userID uuid.UUID, a
 	}
 
 	// 2. Check linked bank accounts (sorted by priority)
-	accounts, err := e.bankRepo.GetByUserID(ctx, userID)
+	accounts, err := e.bankRepo.GetByUserID(ctx, userID, 100, 0)
 	if err != nil {
 		return nil, fmt.Errorf("get bank accounts: %w", err)
 	}
@@ -353,7 +360,7 @@ func (e *SourcingEngine) BuildDebitPlan(ctx context.Context, userID uuid.UUID, a
 	}
 
 	if remaining > 0 {
-		return nil, fmt.Errorf("insufficient funds: need %v more across all accounts", remaining.NGN())
+		return nil, fmt.Errorf("%w: need %v more across all accounts", ErrInsufficientFunds, remaining.NGN())
 	}
 
 	plan.Total = amount

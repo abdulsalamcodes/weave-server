@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -17,16 +19,16 @@ import (
 )
 
 type BankHandler struct {
-	bankRepo    *repository.BankAccountRepo
-	userRepo    *repository.UserRepo
-	okraClient  *okra.Client
-	monoClient  *mono.Client
-	logger      *slog.Logger
+	bankRepo   repository.BankAccountRepository
+	userRepo   repository.UserRepository
+	okraClient *okra.Client
+	monoClient *mono.Client
+	logger     *slog.Logger
 }
 
 func NewBankHandler(
-	bankRepo *repository.BankAccountRepo,
-	userRepo *repository.UserRepo,
+	bankRepo repository.BankAccountRepository,
+	userRepo repository.UserRepository,
 	okraClient *okra.Client,
 	monoClient *mono.Client,
 	logger *slog.Logger,
@@ -132,8 +134,24 @@ type okraWebhookPayload struct {
 }
 
 func (h *BankHandler) OkraWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	if h.okraClient != nil {
+		sig := r.Header.Get("X-Okra-Signature")
+		if sig == "" || !h.okraClient.VerifyWebhook(sig, body) {
+			h.logger.Warn("invalid okra webhook signature")
+			respondError(w, http.StatusUnauthorized, "invalid_signature")
+			return
+		}
+	}
+
 	var payload okraWebhookPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_payload")
 		return
 	}
@@ -184,8 +202,24 @@ type monoWebhookPayload struct {
 }
 
 func (h *BankHandler) MonoWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	if h.monoClient != nil {
+		sig := r.Header.Get("mono-signature")
+		if sig == "" || !h.monoClient.VerifyWebhook(sig, body) {
+			h.logger.Warn("invalid mono webhook signature")
+			respondError(w, http.StatusUnauthorized, "invalid_signature")
+			return
+		}
+	}
+
 	var payload monoWebhookPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_payload")
 		return
 	}
@@ -224,7 +258,10 @@ func (h *BankHandler) ListBanks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accounts, err := h.bankRepo.GetByUserID(r.Context(), userID)
+	page, perPage := parsePagination(r, 1, 20)
+	offset := (page - 1) * perPage
+
+	accounts, err := h.bankRepo.GetByUserID(r.Context(), userID, perPage, offset)
 	if err != nil {
 		h.logger.Error("list banks failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "list_failed")

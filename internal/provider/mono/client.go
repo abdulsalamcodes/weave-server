@@ -3,6 +3,9 @@ package mono
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha512"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -148,4 +151,14 @@ func parseResponse[T any](resp *http.Response, err error) (*T, error) {
 	}
 
 	return &result, nil
+}
+
+// VerifyWebhook verifies Mono webhook HMAC-SHA512 signature.
+// Mono signs webhooks with HMAC-SHA512 using the secret key.
+// The signature is in the "mono-signature" header as a hex-encoded string.
+func (c *Client) VerifyWebhook(signature string, body []byte) bool {
+	mac := hmac.New(sha512.New, []byte(c.secretKey))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(signature), []byte(expected))
 }

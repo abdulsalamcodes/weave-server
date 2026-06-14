@@ -20,7 +20,7 @@ func NewWalletRepo(pool *pgxpool.Pool) *WalletRepo {
 }
 
 func (r *WalletRepo) Create(ctx context.Context, wallet *model.Wallet) error {
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO wallets (user_id, type, balance, ledger_balance, currency)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, created_at, updated_at
@@ -35,7 +35,7 @@ func (r *WalletRepo) Create(ctx context.Context, wallet *model.Wallet) error {
 
 func (r *WalletRepo) GetByUserID(ctx context.Context, userID uuid.UUID) (*model.Wallet, error) {
 	wallet := &model.Wallet{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, COALESCE(user_id, '00000000-0000-0000-0000-000000000000'), type,
 		       balance, ledger_balance, currency, created_at, updated_at
 		FROM wallets WHERE user_id = $1 AND type = 'user'
@@ -55,7 +55,7 @@ func (r *WalletRepo) GetByUserID(ctx context.Context, userID uuid.UUID) (*model.
 
 func (r *WalletRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Wallet, error) {
 	wallet := &model.Wallet{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, COALESCE(user_id, '00000000-0000-0000-0000-000000000000'), type,
 		       balance, ledger_balance, currency, created_at, updated_at
 		FROM wallets WHERE id = $1
@@ -74,7 +74,7 @@ func (r *WalletRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Wallet, 
 }
 
 func (r *WalletRepo) Credit(ctx context.Context, walletID uuid.UUID, amount model.Amount) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE wallets SET balance = balance + $2, ledger_balance = ledger_balance + $2, updated_at = NOW()
 		WHERE id = $1
 	`, walletID, amount)
@@ -85,7 +85,7 @@ func (r *WalletRepo) Credit(ctx context.Context, walletID uuid.UUID, amount mode
 }
 
 func (r *WalletRepo) Debit(ctx context.Context, walletID uuid.UUID, amount model.Amount) error {
-	tag, err := r.pool.Exec(ctx, `
+	tag, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE wallets SET balance = balance - $2, ledger_balance = ledger_balance - $2, updated_at = NOW()
 		WHERE id = $1 AND balance >= $2 AND ledger_balance >= $2
 	`, walletID, amount)
@@ -99,7 +99,7 @@ func (r *WalletRepo) Debit(ctx context.Context, walletID uuid.UUID, amount model
 }
 
 func (r *WalletRepo) Hold(ctx context.Context, walletID uuid.UUID, amount model.Amount) error {
-	tag, err := r.pool.Exec(ctx, `
+	tag, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE wallets SET ledger_balance = ledger_balance - $2, updated_at = NOW()
 		WHERE id = $1 AND ledger_balance >= $2
 	`, walletID, amount)
@@ -113,7 +113,7 @@ func (r *WalletRepo) Hold(ctx context.Context, walletID uuid.UUID, amount model.
 }
 
 func (r *WalletRepo) ReleaseHold(ctx context.Context, walletID uuid.UUID, amount model.Amount) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE wallets SET ledger_balance = ledger_balance + $2, updated_at = NOW()
 		WHERE id = $1
 	`, walletID, amount)
@@ -124,7 +124,7 @@ func (r *WalletRepo) ReleaseHold(ctx context.Context, walletID uuid.UUID, amount
 }
 
 func (r *WalletRepo) RecordTransaction(ctx context.Context, wt *model.WalletTransaction) error {
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO wallet_transactions (wallet_id, type, amount, reference, description, status)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at
@@ -140,7 +140,7 @@ func (r *WalletRepo) RecordTransaction(ctx context.Context, wt *model.WalletTran
 // Wallet Account operations
 
 func (r *WalletRepo) CreateWalletAccount(ctx context.Context, wa *model.WalletAccount) error {
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO wallet_accounts (user_id, provider, provider_ref, account_number, account_name, bank_name, bank_code, is_default)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, created_at, updated_at
@@ -155,7 +155,7 @@ func (r *WalletRepo) CreateWalletAccount(ctx context.Context, wa *model.WalletAc
 
 func (r *WalletRepo) GetWalletAccountByUserID(ctx context.Context, userID uuid.UUID) (*model.WalletAccount, error) {
 	wa := &model.WalletAccount{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, user_id, provider, provider_ref, account_number, account_name,
 		       bank_name, bank_code, is_active, is_default, created_at, updated_at
 		FROM wallet_accounts WHERE user_id = $1 AND is_active = true
@@ -175,7 +175,7 @@ func (r *WalletRepo) GetWalletAccountByUserID(ctx context.Context, userID uuid.U
 
 func (r *WalletRepo) GetWalletAccountByNumber(ctx context.Context, number string) (*model.WalletAccount, error) {
 	wa := &model.WalletAccount{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, user_id, provider, provider_ref, account_number, account_name,
 		       bank_name, bank_code, is_active, is_default, created_at, updated_at
 		FROM wallet_accounts WHERE account_number = $1 AND is_active = true
@@ -193,7 +193,7 @@ func (r *WalletRepo) GetWalletAccountByNumber(ctx context.Context, number string
 }
 
 func (r *WalletRepo) RecordDeposit(ctx context.Context, deposit *model.WalletDeposit) error {
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO wallet_deposits (wallet_account_id, user_id, amount, fee, provider, provider_ref,
 		                             sender_account, sender_bank, status, webhook_raw)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)

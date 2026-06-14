@@ -22,7 +22,7 @@ func NewUserRepo(pool *pgxpool.Pool) *UserRepo {
 
 func (r *UserRepo) Create(ctx context.Context, input model.CreateUserInput) (*model.User, error) {
 	user := &model.User{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO users (phone, full_name, pin_hash)
 		VALUES ($1, $2, $3)
 		RETURNING id, phone, full_name, kyc_level, biometric_enabled, created_at, updated_at
@@ -39,7 +39,7 @@ func (r *UserRepo) Create(ctx context.Context, input model.CreateUserInput) (*mo
 
 func (r *UserRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.User, error) {
 	user := &model.User{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, phone, COALESCE(email, ''), full_name,
 		       pin_hash, kyc_level, biometric_enabled,
 		       COALESCE(biometric_public_key, ''),
@@ -62,7 +62,7 @@ func (r *UserRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.User, erro
 
 func (r *UserRepo) GetByPhone(ctx context.Context, phone string) (*model.User, error) {
 	user := &model.User{}
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, phone, COALESCE(email, ''), full_name,
 		       pin_hash, kyc_level, biometric_enabled,
 		       COALESCE(biometric_public_key, ''),
@@ -84,7 +84,7 @@ func (r *UserRepo) GetByPhone(ctx context.Context, phone string) (*model.User, e
 }
 
 func (r *UserRepo) UpdateKYC(ctx context.Context, userID uuid.UUID, level model.KYCLevel, bvnHash, ninHash string) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE users SET kyc_level = $2, bvn_hash = $3, nin_hash = $4, updated_at = NOW()
 		WHERE id = $1
 	`, userID, level, bvnHash, ninHash)
@@ -95,7 +95,7 @@ func (r *UserRepo) UpdateKYC(ctx context.Context, userID uuid.UUID, level model.
 }
 
 func (r *UserRepo) RecordPINAttempt(ctx context.Context, userID uuid.UUID, success bool, ip string) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		INSERT INTO pin_attempts (user_id, success, ip_address)
 		VALUES ($1, $2, $3)
 	`, userID, success, ip)
@@ -104,7 +104,7 @@ func (r *UserRepo) RecordPINAttempt(ctx context.Context, userID uuid.UUID, succe
 
 func (r *UserRepo) RecentFailedPINAttempts(ctx context.Context, userID uuid.UUID, within time.Duration) (int, error) {
 	var count int
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT COUNT(*) FROM pin_attempts
 		WHERE user_id = $1 AND success = false AND created_at > NOW() - $2::interval
 	`, userID, fmt.Sprintf("%d minutes", int(within.Minutes()))).Scan(&count)
@@ -114,8 +114,20 @@ func (r *UserRepo) RecentFailedPINAttempts(ctx context.Context, userID uuid.UUID
 	return count, nil
 }
 
+func (r *UserRepo) RecentFailedPINAttemptsByIP(ctx context.Context, ip string, within time.Duration) (int, error) {
+	var count int
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
+		SELECT COUNT(*) FROM pin_attempts
+		WHERE ip_address = $1 AND success = false AND created_at > NOW() - $2::interval
+	`, ip, fmt.Sprintf("%d minutes", int(within.Minutes()))).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count ip pin attempts: %w", err)
+	}
+	return count, nil
+}
+
 func (r *UserRepo) UpdatePIN(ctx context.Context, userID uuid.UUID, pinHash string) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE users SET pin_hash = $2, updated_at = NOW() WHERE id = $1
 	`, userID, pinHash)
 	return err

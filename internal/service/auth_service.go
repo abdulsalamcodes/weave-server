@@ -9,6 +9,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/abdulsalamcodes/weave-server/internal/config"
@@ -25,21 +26,23 @@ var (
 )
 
 type AuthService struct {
-	userRepo  *repository.UserRepo
-	walletRepo *repository.WalletRepo
-	cfg       config.AuthConfig
-	jwtSecret string
-	accessTTL time.Duration
+	userRepo   repository.UserRepository
+	walletRepo repository.WalletRepository
+	cfg        config.AuthConfig
+	jwtSecret  string
+	accessTTL  time.Duration
 	refreshTTL time.Duration
-	logger    *slog.Logger
+	pool       *pgxpool.Pool
+	logger     *slog.Logger
 }
 
 func NewAuthService(
-	userRepo *repository.UserRepo,
-	walletRepo *repository.WalletRepo,
+	userRepo repository.UserRepository,
+	walletRepo repository.WalletRepository,
 	cfg config.AuthConfig,
 	jwtSecret string,
 	accessTTL, refreshTTL time.Duration,
+	pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) *AuthService {
 	return &AuthService{
@@ -49,6 +52,7 @@ func NewAuthService(
 		jwtSecret:  jwtSecret,
 		accessTTL:  accessTTL,
 		refreshTTL: refreshTTL,
+		pool:       pool,
 		logger:     logger,
 	}
 }
@@ -65,6 +69,28 @@ func (s *AuthService) Register(ctx context.Context, phone, fullName, pin string)
 	pinHash, err := bcrypt.GenerateFromPassword([]byte(pin), s.cfg.BcryptCost)
 	if err != nil {
 		return nil, fmt.Errorf("hash pin: %w", err)
+	}
+
+	if s.pool != nil {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin transaction: %w", err)
+		}
+		defer func() {
+			if err != nil {
+				if rbErr := tx.Rollback(ctx); rbErr != nil {
+					s.logger.Error("tx rollback failed", "error", rbErr)
+				}
+			}
+		}()
+		ctx = repository.WithTx(ctx, tx)
+		defer func() {
+			if err == nil {
+				if cErr := tx.Commit(ctx); cErr != nil {
+					err = fmt.Errorf("commit transaction: %w", cErr)
+				}
+			}
+		}()
 	}
 
 	user, err := s.userRepo.Create(ctx, model.CreateUserInput{
@@ -106,12 +132,21 @@ func (s *AuthService) Login(ctx context.Context, phone, pin string) (*model.User
 		return nil, ErrUserNotFound
 	}
 
-	// Check PIN lockout
+	// Check PIN lockout (per-user)
 	failedAttempts, err := s.userRepo.RecentFailedPINAttempts(ctx, user.ID, time.Duration(s.cfg.PINLockoutMins)*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("check pin attempts: %w", err)
 	}
 	if failedAttempts >= s.cfg.MaxPINAttempts {
+		return nil, ErrPINLocked
+	}
+
+	// Check PIN lockout (per-IP) — threshold is 3x to allow shared IPs
+	ipFailed, err := s.userRepo.RecentFailedPINAttemptsByIP(ctx, getIP(ctx), time.Duration(s.cfg.PINLockoutMins)*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("check ip pin attempts: %w", err)
+	}
+	if ipFailed >= s.cfg.MaxPINAttempts*3 {
 		return nil, ErrPINLocked
 	}
 
@@ -145,6 +180,14 @@ func (s *AuthService) VerifyPIN(ctx context.Context, userID uuid.UUID, pin strin
 		return fmt.Errorf("check pin attempts: %w", err)
 	}
 	if failedAttempts >= s.cfg.MaxPINAttempts {
+		return ErrPINLocked
+	}
+
+	ipFailed, err := s.userRepo.RecentFailedPINAttemptsByIP(ctx, getIP(ctx), time.Duration(s.cfg.PINLockoutMins)*time.Minute)
+	if err != nil {
+		return fmt.Errorf("check ip pin attempts: %w", err)
+	}
+	if ipFailed >= s.cfg.MaxPINAttempts*3 {
 		return ErrPINLocked
 	}
 

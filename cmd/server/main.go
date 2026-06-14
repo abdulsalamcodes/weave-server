@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 
@@ -63,5 +62,4 @@ func main() {
 	}
 
 	log.Info("server stopped")
-	fmt.Println("bye")
 }

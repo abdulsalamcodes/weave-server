@@ -23,7 +23,7 @@ func NewTransactionRepo(pool *pgxpool.Pool) *TransactionRepo {
 func (r *TransactionRepo) Create(ctx context.Context, input model.CreateTransactionInput) (*model.Transaction, error) {
 	txn := &model.Transaction{}
 	now := time.Now()
-	err := r.pool.QueryRow(ctx, `
+	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO transactions (user_id, parent_id, type, amount, fee, currency, status,
 		                          source_account_id, source_provider,
 		                          recipient_account, recipient_bank_code, recipient_name,
@@ -55,9 +55,26 @@ func (r *TransactionRepo) Create(ctx context.Context, input model.CreateTransact
 	return txn, nil
 }
 
-func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Transaction, error) {
+func scanTransaction(row pgx.Row) (*model.Transaction, error) {
 	txn := &model.Transaction{}
-	err := r.pool.QueryRow(ctx, `
+	err := row.Scan(
+		&txn.ID, &txn.UserID, &txn.ParentID, &txn.Type, &txn.Amount, &txn.Fee,
+		&txn.Currency, &txn.Status, &txn.SourceAccountID, &txn.SourceProvider,
+		&txn.RecipientAccount, &txn.RecipientBankCode, &txn.RecipientName,
+		&txn.ProviderRef, &txn.OurRef, &txn.IdempotencyKey,
+		&txn.FailureReason, &txn.CreatedAt, &txn.CompletedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return txn, nil
+}
+
+func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Transaction, error) {
+	txn, err := scanTransaction(	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, user_id, parent_id, type, amount, fee, currency, status,
 		       source_account_id, COALESCE(source_provider, ''),
 		       COALESCE(recipient_account, ''), COALESCE(recipient_bank_code, ''),
@@ -65,16 +82,7 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Tra
 		       our_ref, COALESCE(idempotency_key, ''),
 		       COALESCE(failure_reason, ''), created_at, completed_at
 		FROM transactions WHERE id = $1
-	`, id).Scan(
-		&txn.ID, &txn.UserID, &txn.ParentID, &txn.Type, &txn.Amount, &txn.Fee,
-		&txn.Currency, &txn.Status, &txn.SourceAccountID, &txn.SourceProvider,
-		&txn.RecipientAccount, &txn.RecipientBankCode, &txn.RecipientName,
-		&txn.ProviderRef, &txn.OurRef, &txn.IdempotencyKey,
-		&txn.FailureReason, &txn.CreatedAt, &txn.CompletedAt,
-	)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
+	`, id))
 	if err != nil {
 		return nil, fmt.Errorf("get transaction: %w", err)
 	}
@@ -82,8 +90,7 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Tra
 }
 
 func (r *TransactionRepo) GetByOurRef(ctx context.Context, ourRef string) (*model.Transaction, error) {
-	txn := &model.Transaction{}
-	err := r.pool.QueryRow(ctx, `
+	txn, err := scanTransaction(	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, user_id, parent_id, type, amount, fee, currency, status,
 		       source_account_id, COALESCE(source_provider, ''),
 		       COALESCE(recipient_account, ''), COALESCE(recipient_bank_code, ''),
@@ -91,16 +98,7 @@ func (r *TransactionRepo) GetByOurRef(ctx context.Context, ourRef string) (*mode
 		       our_ref, COALESCE(idempotency_key, ''),
 		       COALESCE(failure_reason, ''), created_at, completed_at
 		FROM transactions WHERE our_ref = $1
-	`, ourRef).Scan(
-		&txn.ID, &txn.UserID, &txn.ParentID, &txn.Type, &txn.Amount, &txn.Fee,
-		&txn.Currency, &txn.Status, &txn.SourceAccountID, &txn.SourceProvider,
-		&txn.RecipientAccount, &txn.RecipientBankCode, &txn.RecipientName,
-		&txn.ProviderRef, &txn.OurRef, &txn.IdempotencyKey,
-		&txn.FailureReason, &txn.CreatedAt, &txn.CompletedAt,
-	)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
+	`, ourRef))
 	if err != nil {
 		return nil, fmt.Errorf("get transaction by ref: %w", err)
 	}
@@ -108,7 +106,7 @@ func (r *TransactionRepo) GetByOurRef(ctx context.Context, ourRef string) (*mode
 }
 
 func (r *TransactionRepo) GetByParentID(ctx context.Context, parentID uuid.UUID) ([]model.Transaction, error) {
-	rows, err := r.pool.Query(ctx, `
+	rows, err := 	getQuerier(ctx, r.pool).Query(ctx, `
 		SELECT id, user_id, parent_id, type, amount, fee, currency, status,
 		       source_account_id, COALESCE(source_provider, ''),
 		       COALESCE(recipient_account, ''), COALESCE(recipient_bank_code, ''),
@@ -125,28 +123,28 @@ func (r *TransactionRepo) GetByParentID(ctx context.Context, parentID uuid.UUID)
 
 	var txns []model.Transaction
 	for rows.Next() {
-		var t model.Transaction
-		err := rows.Scan(
-			&t.ID, &t.UserID, &t.ParentID, &t.Type, &t.Amount, &t.Fee,
-			&t.Currency, &t.Status, &t.SourceAccountID, &t.SourceProvider,
-			&t.RecipientAccount, &t.RecipientBankCode, &t.RecipientName,
-			&t.ProviderRef, &t.OurRef, &t.IdempotencyKey,
-			&t.FailureReason, &t.CreatedAt, &t.CompletedAt,
-		)
+		t, err := scanTransaction(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scan child transaction: %w", err)
 		}
-		txns = append(txns, t)
+		txns = append(txns, *t)
 	}
 	return txns, nil
 }
 
 func (r *TransactionRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status model.TransactionStatus, failureReason string) error {
-	now := time.Now()
-	_, err := r.pool.Exec(ctx, `
-		UPDATE transactions SET status = $2, failure_reason = $3, completed_at = $4
-		WHERE id = $1
-	`, id, status, failureReason, now)
+	var err error
+	if status == model.TxnStatusCompleted || status == model.TxnStatusFailed {
+		_, err = 	getQuerier(ctx, r.pool).Exec(ctx, `
+			UPDATE transactions SET status = $2, failure_reason = $3, completed_at = NOW()
+			WHERE id = $1
+		`, id, status, failureReason)
+	} else {
+		_, err = 	getQuerier(ctx, r.pool).Exec(ctx, `
+			UPDATE transactions SET status = $2, failure_reason = $3
+			WHERE id = $1
+		`, id, status, failureReason)
+	}
 	if err != nil {
 		return fmt.Errorf("update transaction status: %w", err)
 	}
@@ -154,7 +152,7 @@ func (r *TransactionRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status
 }
 
 func (r *TransactionRepo) UpdateProviderRef(ctx context.Context, id uuid.UUID, providerRef string) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
 		UPDATE transactions SET provider_ref = $2 WHERE id = $1
 	`, id, providerRef)
 	if err != nil {
@@ -164,8 +162,7 @@ func (r *TransactionRepo) UpdateProviderRef(ctx context.Context, id uuid.UUID, p
 }
 
 func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (*model.Transaction, error) {
-	txn := &model.Transaction{}
-	err := r.pool.QueryRow(ctx, `
+	txn, err := scanTransaction(	getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT id, user_id, parent_id, type, amount, fee, currency, status,
 		       source_account_id, COALESCE(source_provider, ''),
 		       COALESCE(recipient_account, ''), COALESCE(recipient_bank_code, ''),
@@ -173,16 +170,7 @@ func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (
 		       our_ref, COALESCE(idempotency_key, ''),
 		       COALESCE(failure_reason, ''), created_at, completed_at
 		FROM transactions WHERE idempotency_key = $1
-	`, key).Scan(
-		&txn.ID, &txn.UserID, &txn.ParentID, &txn.Type, &txn.Amount, &txn.Fee,
-		&txn.Currency, &txn.Status, &txn.SourceAccountID, &txn.SourceProvider,
-		&txn.RecipientAccount, &txn.RecipientBankCode, &txn.RecipientName,
-		&txn.ProviderRef, &txn.OurRef, &txn.IdempotencyKey,
-		&txn.FailureReason, &txn.CreatedAt, &txn.CompletedAt,
-	)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
+	`, key))
 	if err != nil {
 		return nil, fmt.Errorf("get transaction by idempotency key: %w", err)
 	}
