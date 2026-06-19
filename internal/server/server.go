@@ -156,7 +156,7 @@ func (s *Server) setupRoutes() {
 	authHandler := handler.NewAuthHandler(authService, s.logger)
 	walletHandler := handler.NewWalletHandler(walletService, s.logger)
 	transferHandler := handler.NewTransferHandler(transferService, txnRepo, s.logger)
-	chatHandler := handler.NewChatHandler(transferService, walletService, authService, bankRepo, txnRepo, paystackClient, s.rdb, llmClient, s.logger)
+	chatHandler := handler.NewChatHandler(transferService, walletService, bankRepo, txnRepo, paystackClient, monoClient, s.rdb, llmClient, s.logger)
 	bankHandler := handler.NewBankHandler(bankRepo, userRepo, monoClient, s.rdb, s.logger)
 	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, s.logger)
 
