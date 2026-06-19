@@ -20,7 +20,6 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/middleware"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/llm"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/mono"
-	"github.com/abdulsalamcodes/weave-server/internal/provider/okra"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 	"github.com/abdulsalamcodes/weave-server/internal/service"
@@ -130,17 +129,8 @@ func (s *Server) setupRoutes() {
 		s.logger.Info("paystack client initialized")
 	}
 
-	var llmClient *llm.Client
-	if s.cfg.LLM.APIKey != "" {
-		llmClient = llm.NewClient(s.cfg.LLM.APIKey, s.cfg.LLM.Model)
-		s.logger.Info("llm client initialized", "model", s.cfg.LLM.Model)
-	}
-
-	var okraClient *okra.Client
-	if s.cfg.Okra.ClientID != "" && s.cfg.Okra.Secret != "" {
-		okraClient = okra.NewClient(s.cfg.Okra.ClientID, s.cfg.Okra.Secret)
-		s.logger.Info("okra client initialized")
-	}
+	llmClient := llm.NewClient(s.cfg.LLM.APIKey, s.cfg.LLM.Model, s.cfg.LLM.BaseURL)
+	s.logger.Info("llm client initialized", "model", s.cfg.LLM.Model, "base_url", s.cfg.LLM.BaseURL)
 
 	var monoClient *mono.Client
 	if s.cfg.Mono.SecretKey != "" {
@@ -156,18 +146,18 @@ func (s *Server) setupRoutes() {
 		s.db,
 		s.logger,
 	)
-	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.logger)
+	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.cfg.Paystack.Bank, s.logger)
 	sourcingEngine := service.NewSourcingEngine(walletService, bankRepo, s.logger)
 	payoutService := service.NewPayoutService(paystackClient, s.logger)
-	transferService := service.NewTransferService(txnRepo, walletRepo, bankRepo, walletService, sourcingEngine, payoutService, monoClient, okraClient, s.db, s.logger)
+	transferService := service.NewTransferService(txnRepo, walletRepo, bankRepo, walletService, sourcingEngine, payoutService, monoClient, s.db, s.logger)
 
 	// Handlers
 	healthHandler := handler.NewHealthHandler()
 	authHandler := handler.NewAuthHandler(authService, s.logger)
 	walletHandler := handler.NewWalletHandler(walletService, s.logger)
 	transferHandler := handler.NewTransferHandler(transferService, txnRepo, s.logger)
-	chatHandler := handler.NewChatHandler(transferService, walletService, authService, llmClient, s.logger)
-	bankHandler := handler.NewBankHandler(bankRepo, userRepo, okraClient, monoClient, s.logger)
+	chatHandler := handler.NewChatHandler(transferService, walletService, authService, bankRepo, txnRepo, paystackClient, s.rdb, llmClient, s.logger)
+	bankHandler := handler.NewBankHandler(bankRepo, userRepo, monoClient, s.rdb, s.logger)
 	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, s.logger)
 
 	// Routes

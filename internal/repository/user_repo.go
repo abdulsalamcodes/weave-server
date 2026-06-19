@@ -95,10 +95,14 @@ func (r *UserRepo) UpdateKYC(ctx context.Context, userID uuid.UUID, level model.
 }
 
 func (r *UserRepo) RecordPINAttempt(ctx context.Context, userID uuid.UUID, success bool, ip string) error {
-	_, err := 	getQuerier(ctx, r.pool).Exec(ctx, `
+	var ipVal interface{}
+	if ip != "" {
+		ipVal = ip
+	}
+	_, err := getQuerier(ctx, r.pool).Exec(ctx, `
 		INSERT INTO pin_attempts (user_id, success, ip_address)
 		VALUES ($1, $2, $3)
-	`, userID, success, ip)
+	`, userID, success, ipVal)
 	return err
 }
 
@@ -115,8 +119,11 @@ func (r *UserRepo) RecentFailedPINAttempts(ctx context.Context, userID uuid.UUID
 }
 
 func (r *UserRepo) RecentFailedPINAttemptsByIP(ctx context.Context, ip string, within time.Duration) (int, error) {
+	if ip == "" {
+		return 0, nil
+	}
 	var count int
-	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
+	err := getQuerier(ctx, r.pool).QueryRow(ctx, `
 		SELECT COUNT(*) FROM pin_attempts
 		WHERE ip_address = $1 AND success = false AND created_at > NOW() - $2::interval
 	`, ip, fmt.Sprintf("%d minutes", int(within.Minutes()))).Scan(&count)

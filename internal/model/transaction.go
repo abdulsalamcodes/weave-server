@@ -78,7 +78,7 @@ type BankAccount struct {
 	BankName         string    `json:"bank_name"`
 	Priority         int       `json:"priority"`     // 1=highest
 	MinBalance       Amount    `json:"min_balance"`  // cushion to preserve
-	LastBalance      Amount    `json:"last_balance,omitempty"`
+	LastBalance      Amount    `json:"last_balance"`
 	IsActive         bool      `json:"is_active"`
 	IsVerified       bool      `json:"is_verified"`
 	CreatedAt        time.Time `json:"created_at"`

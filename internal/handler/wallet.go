@@ -27,6 +27,7 @@ func NewWalletHandler(walletService *service.WalletService, logger *slog.Logger)
 
 func (h *WalletHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/wallet", h.GetWallet)
+	r.Get("/wallet/account", h.GetAccount)
 	r.Post("/wallet/account", h.IssueAccount)
 }
 
@@ -58,6 +59,32 @@ type issueAccountResponse struct {
 	BankCode      string `json:"bank_code"`
 }
 
+func (h *WalletHandler) GetAccount(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	account, err := h.walletService.GetWalletAccount(r.Context(), userID)
+	if err != nil {
+		h.logger.Error("get account failed", "error", err)
+		respondError(w, http.StatusInternalServerError, "get_account_failed")
+		return
+	}
+	if account == nil {
+		respondError(w, http.StatusNotFound, "no_wallet_account")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, issueAccountResponse{
+		AccountNumber: account.AccountNumber,
+		AccountName:   account.AccountName,
+		BankName:      account.BankName,
+		BankCode:      account.BankCode,
+	})
+}
+
 func (h *WalletHandler) IssueAccount(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r.Context())
 	if !ok {
@@ -68,7 +95,7 @@ func (h *WalletHandler) IssueAccount(w http.ResponseWriter, r *http.Request) {
 	account, err := h.walletService.IssueWalletAccount(r.Context(), userID)
 	if err != nil {
 		h.logger.Error("issue account failed", "error", err)
-		respondError(w, http.StatusInternalServerError, "issue_account_failed")
+		respondErrorMsg(w, http.StatusInternalServerError, "issue_account_failed", err.Error())
 		return
 	}
 

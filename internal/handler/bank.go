@@ -4,47 +4,52 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
+
+	"context"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/abdulsalamcodes/weave-server/internal/middleware"
 	"github.com/abdulsalamcodes/weave-server/internal/model"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/mono"
-	"github.com/abdulsalamcodes/weave-server/internal/provider/okra"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 )
 
 type BankHandler struct {
 	bankRepo   repository.BankAccountRepository
 	userRepo   repository.UserRepository
-	okraClient *okra.Client
 	monoClient *mono.Client
+	rdb        *redis.Client
 	logger     *slog.Logger
 }
 
 func NewBankHandler(
 	bankRepo repository.BankAccountRepository,
 	userRepo repository.UserRepository,
-	okraClient *okra.Client,
 	monoClient *mono.Client,
+	rdb *redis.Client,
 	logger *slog.Logger,
 ) *BankHandler {
 	return &BankHandler{
 		bankRepo:   bankRepo,
 		userRepo:   userRepo,
-		okraClient: okraClient,
 		monoClient: monoClient,
+		rdb:        rdb,
 		logger:     logger,
 	}
 }
 
 func (h *BankHandler) RegisterRoutes(r chi.Router) {
 	r.Post("/banks/link", h.InitiateLink)
-	r.Post("/banks/webhook/okra", h.OkraWebhook)
+	r.Post("/banks/complete", h.CompleteLink)
+	r.Post("/banks/exchange", h.ExchangeCode)
 	r.Post("/banks/webhook/mono", h.MonoWebhook)
 	r.Get("/banks", h.ListBanks)
 	r.Put("/banks/{id}/priority", h.UpdatePriority)
@@ -53,7 +58,7 @@ func (h *BankHandler) RegisterRoutes(r chi.Router) {
 }
 
 type initiateLinkRequest struct {
-	Provider string `json:"provider"` // "okra" or "mono"
+	Provider string `json:"provider"` // "mono"
 }
 
 func (h *BankHandler) InitiateLink(w http.ResponseWriter, r *http.Request) {
@@ -76,42 +81,31 @@ func (h *BankHandler) InitiateLink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch req.Provider {
-	case "okra":
-		if h.okraClient == nil {
-			respondError(w, http.StatusServiceUnavailable, "okra_not_configured")
-			return
-		}
-		result, err := h.okraClient.GenerateConnectURL(r.Context(), &okra.ConnectRequest{
-			CustomerID:  userID.String(),
-			FirstName:   user.FullName,
-			Phone:       user.Phone,
-			CallbackURL: "",
-		})
-		if err != nil {
-			h.logger.Error("okra connect failed", "error", err)
-			respondError(w, http.StatusInternalServerError, "connect_failed")
-			return
-		}
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"connect_url": result.Data.ConnectURL,
-			"reference":   result.Data.Reference,
-			"provider":    "okra",
-		})
-
 	case "mono":
 		if h.monoClient == nil {
 			respondError(w, http.StatusServiceUnavailable, "mono_not_configured")
 			return
 		}
-		result, err := h.monoClient.GenerateConnectURL(r.Context(), userID.String(), user.FullName, user.Email)
+		email := user.Email
+		if email == "" {
+			email = user.Phone + "@weave.ng"
+		}
+		ref := fmt.Sprintf("%s-%d", userID.String(), time.Now().UnixMilli())
+		redirectURL := fmt.Sprintf("http://localhost:3000/app/banks?ref=%s", ref)
+		result, err := h.monoClient.GenerateConnectURL(r.Context(), ref, user.FullName, email, redirectURL)
 		if err != nil {
 			h.logger.Error("mono connect failed", "error", err)
-			respondError(w, http.StatusInternalServerError, "connect_failed")
+			respondErrorMsg(w, http.StatusInternalServerError, "connect_failed", err.Error())
 			return
 		}
+		// Store ref → customer_id in Redis for 30 minutes
+		if h.rdb != nil {
+			customerID := result.Data.Customer
+			h.rdb.Set(context.Background(), "mono:ref:"+ref, customerID, 30*time.Minute)
+		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"connect_url": result.Data.ConnectURL,
-			"reference":   result.Data.Reference,
+			"connect_url": result.Data.MonoURL,
+			"reference":   ref,
 			"provider":    "mono",
 		})
 
@@ -120,73 +114,138 @@ func (h *BankHandler) InitiateLink(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type okraWebhookPayload struct {
-	Event   string `json:"event"`
-	Account struct {
-		ID            string  `json:"id"`
-		AccountNumber string  `json:"account_number"`
-		AccountName   string  `json:"account_name"`
-		BankName      string  `json:"bank_name"`
-		BankCode      string  `json:"bank_code"`
-		Balance       float64 `json:"balance"`
-		AccessToken   string  `json:"access_token"`
-	} `json:"account"`
-	Reference string `json:"reference"`
+type completeLinkRequest struct {
+	Ref string `json:"ref"`
 }
 
-func (h *BankHandler) OkraWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+func (h *BankHandler) CompleteLink(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req completeLinkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Ref == "" {
+		respondError(w, http.StatusBadRequest, "ref_required")
+		return
+	}
+
+	if h.monoClient == nil {
+		respondError(w, http.StatusServiceUnavailable, "mono_not_configured")
+		return
+	}
+
+	// Look up customer_id from Redis
+	customerID, err := h.rdb.Get(r.Context(), "mono:ref:"+req.Ref).Result()
 	if err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_body")
+		h.logger.Error("ref not found in redis", "ref", req.Ref, "error", err)
+		respondError(w, http.StatusBadRequest, "ref_expired_or_invalid")
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	if h.okraClient != nil {
-		sig := r.Header.Get("X-Okra-Signature")
-		if sig == "" || !h.okraClient.VerifyWebhook(sig, body) {
-			h.logger.Warn("invalid okra webhook signature")
-			respondError(w, http.StatusUnauthorized, "invalid_signature")
-			return
+	accounts, err := h.monoClient.GetCustomerAccounts(r.Context(), customerID)
+	if err != nil {
+		h.logger.Error("get customer accounts failed", "error", err)
+		respondErrorMsg(w, http.StatusInternalServerError, "fetch_accounts_failed", err.Error())
+		return
+	}
+
+	if len(accounts.Data) == 0 {
+		respondError(w, http.StatusNotFound, "no_accounts_found")
+		return
+	}
+
+	var saved []model.BankAccount
+	for _, acc := range accounts.Data {
+		providerToken := acc.ID
+		if providerToken == "" {
+			providerToken = customerID
 		}
+		bank := &model.BankAccount{
+			UserID:        userID,
+			Provider:      "mono",
+			ProviderToken: providerToken,
+			AccountNumber: acc.AccountNumber,
+			AccountName:   acc.AccountName,
+			BankCode:      "",
+			BankName:      acc.Bank,
+			LastBalance:   model.Amount(int64(acc.Balance)),
+			Priority:      5,
+			IsActive:      true,
+			IsVerified:    true,
+		}
+		if err := h.bankRepo.Create(r.Context(), bank); err != nil {
+			h.logger.Error("save bank account failed", "error", err)
+			continue
+		}
+		saved = append(saved, *bank)
 	}
 
-	var payload okraWebhookPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_payload")
+	h.rdb.Del(r.Context(), "mono:ref:"+req.Ref)
+	h.logger.Info("bank accounts linked via mono", "count", len(saved), "user_id", userID)
+	respondJSON(w, http.StatusOK, saved)
+}
+
+type exchangeCodeRequest struct {
+	Code string `json:"code"`
+}
+
+func (h *BankHandler) ExchangeCode(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
-	if !okra.IsSupportedEvent(payload.Event) {
-		respondJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+	var req exchangeCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
+		respondError(w, http.StatusBadRequest, "code_required")
+		return
+	}
+
+	if h.monoClient == nil {
+		respondError(w, http.StatusServiceUnavailable, "mono_not_configured")
+		return
+	}
+
+	exchange, err := h.monoClient.ExchangeCode(r.Context(), req.Code)
+	if err != nil {
+		h.logger.Error("mono exchange failed", "error", err)
+		respondErrorMsg(w, http.StatusInternalServerError, "exchange_failed", err.Error())
+		return
+	}
+
+	accountID := exchange.Data.ID
+	details, err := h.monoClient.SyncAccount(r.Context(), accountID)
+	if err != nil {
+		h.logger.Error("mono sync failed", "error", err)
+		respondErrorMsg(w, http.StatusInternalServerError, "sync_failed", err.Error())
 		return
 	}
 
 	bank := &model.BankAccount{
-		Provider:       "okra",
-		ProviderToken:  payload.Account.AccessToken,
-		AccountNumber:  payload.Account.AccountNumber,
-		AccountName:    payload.Account.AccountName,
-		BankCode:       payload.Account.BankCode,
-		BankName:       payload.Account.BankName,
-		LastBalance:    model.NewAmount(int64(payload.Account.Balance)),
-		Priority:       5,
-		IsActive:       true,
-		IsVerified:     true,
+		UserID:        userID,
+		Provider:      "mono",
+		ProviderToken: accountID,
+		AccountNumber: details.Data.AccountNumber,
+		AccountName:   details.Data.AccountName,
+		BankCode:      details.Data.BankCode,
+		BankName:      details.Data.BankName,
+		LastBalance:   model.NewAmount(int64(details.Data.Balance)),
+		Priority:      5,
+		IsActive:      true,
+		IsVerified:    true,
 	}
 
 	if err := h.bankRepo.Create(r.Context(), bank); err != nil {
-		h.logger.Error("save okra account failed", "error", err)
+		h.logger.Error("save mono bank failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "save_failed")
 		return
 	}
 
-	h.logger.Info("bank linked via okra",
-		"account", bank.AccountNumber,
-		"bank", bank.BankName,
-	)
-
-	respondJSON(w, http.StatusOK, map[string]string{"status": "success"})
+	h.logger.Info("bank linked via mono exchange", "account", bank.AccountNumber, "user_id", userID)
+	respondJSON(w, http.StatusOK, bank)
 }
 
 type monoWebhookPayload struct {
@@ -372,19 +431,6 @@ func (h *BankHandler) RefreshBalance(w http.ResponseWriter, r *http.Request) {
 		resp, err := h.monoClient.GetBalance(r.Context(), bank.ProviderToken)
 		if err != nil {
 			h.logger.Error("mono balance refresh failed", "error", err, "account_id", bank.ID)
-			respondError(w, http.StatusInternalServerError, "balance_refresh_failed")
-			return
-		}
-		balance = resp.Data.Balance
-
-	case "okra":
-		if h.okraClient == nil {
-			respondError(w, http.StatusServiceUnavailable, "okra_not_configured")
-			return
-		}
-		resp, err := h.okraClient.GetBalance(r.Context(), bank.ProviderToken)
-		if err != nil {
-			h.logger.Error("okra balance refresh failed", "error", err, "account_id", bank.ID)
 			respondError(w, http.StatusInternalServerError, "balance_refresh_failed")
 			return
 		}

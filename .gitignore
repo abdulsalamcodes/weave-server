@@ -16,8 +16,8 @@ go.work.sum
 
 # Env
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
 
 # IDE
 .idea/
@@ -36,3 +36,12 @@ Thumbs.db
 # Logs
 *.log
 /tmp/
+
+# Local binary (built by `go build`)
+/server
+
+# Postgres data volume
+/pgdata/
+
+# Air live-reload
+tmp/

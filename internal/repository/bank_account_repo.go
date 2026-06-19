@@ -20,13 +20,17 @@ func NewBankAccountRepo(pool *pgxpool.Pool) *BankAccountRepo {
 }
 
 func (r *BankAccountRepo) Create(ctx context.Context, ba *model.BankAccount) error {
-	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
+	err := getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO bank_accounts (user_id, provider, provider_token, account_number,
-		                           account_name, bank_code, bank_name, priority, min_balance)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		                           account_name, bank_code, bank_name, priority, min_balance, last_balance)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (user_id, account_number) DO UPDATE
+		  SET last_balance = EXCLUDED.last_balance,
+		      provider_token = EXCLUDED.provider_token,
+		      updated_at = NOW()
 		RETURNING id, created_at, updated_at
 	`, ba.UserID, ba.Provider, ba.ProviderToken, ba.AccountNumber,
-		ba.AccountName, ba.BankCode, ba.BankName, ba.Priority, ba.MinBalance,
+		ba.AccountName, ba.BankCode, ba.BankName, ba.Priority, ba.MinBalance, ba.LastBalance,
 	).Scan(&ba.ID, &ba.CreatedAt, &ba.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("create bank account: %w", err)

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const baseURL = "https://api.mono.co/v1"
+const baseURL = "https://api.withmono.com/v2"
 
 type Client struct {
 	secretKey  string
@@ -33,19 +33,25 @@ type ConnectResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message"`
 	Data    struct {
-		ID         string `json:"id"`
-		Reference  string `json:"reference"`
-		ConnectURL string `json:"connect_url"`
-		Monokit    string `json:"monokit"`
+		MonoURL  string `json:"mono_url"`
+		Customer string `json:"customer"` // Mono customer ID
+		Meta     struct {
+			Ref string `json:"ref"`
+		} `json:"meta"`
 	} `json:"data"`
 }
 
-func (c *Client) GenerateConnectURL(ctx context.Context, customerID, customerName, customerEmail string) (*ConnectResponse, error) {
+func (c *Client) GenerateConnectURL(ctx context.Context, customerID, customerName, customerEmail, redirectURL string) (*ConnectResponse, error) {
 	req := map[string]interface{}{
-		"customer_id":      customerID,
-		"customer_name":    customerName,
-		"customer_email":   customerEmail,
-		"redirect_url":     "",
+		"customer": map[string]string{
+			"name":  customerName,
+			"email": customerEmail,
+		},
+		"meta": map[string]string{
+			"ref": customerID,
+		},
+		"scope":        "auth",
+		"redirect_url": redirectURL,
 	}
 
 	body, err := json.Marshal(req)
@@ -53,7 +59,7 @@ func (c *Client) GenerateConnectURL(ctx context.Context, customerID, customerNam
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/account/connect", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/accounts/initiate", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -68,11 +74,115 @@ func (c *Client) GenerateConnectURL(ctx context.Context, customerID, customerNam
 
 	raw, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode >= 400 {
+		var apiErr struct {
+			Message string `json:"message"`
+			Error   string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &apiErr)
+		msg := apiErr.Message
+		if msg == "" {
+			msg = apiErr.Error
+		}
+		if msg == "" {
+			msg = string(raw)
+		}
+		return nil, fmt.Errorf("mono API error %d: %s", resp.StatusCode, msg)
+	}
+
 	var result ConnectResponse
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("decode: %w (body: %s)", err, string(raw))
 	}
 
+	return &result, nil
+}
+
+// --- Exchange Code ---
+
+type ExchangeResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Data    struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+func (c *Client) ExchangeCode(ctx context.Context, code string) (*ExchangeResponse, error) {
+	body, _ := json.Marshal(map[string]string{"code": code})
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/accounts/auth", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("mono-sec-key", c.secretKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		var apiErr struct{ Message string `json:"message"` }
+		_ = json.Unmarshal(raw, &apiErr)
+		return nil, fmt.Errorf("mono API error %d: %s", resp.StatusCode, apiErr.Message)
+	}
+
+	var result ExchangeResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w (body: %s)", err, string(raw))
+	}
+	return &result, nil
+}
+
+// --- Customer Accounts ---
+
+type CustomerAccount struct {
+	ID            string  `json:"id"`
+	BVN           string  `json:"bvn"`
+	AccountNumber string  `json:"account_number"`
+	AuthMethod    string  `json:"auth_method"`
+	Bank          string  `json:"bank"`
+	AccountName   string  `json:"account_name"`
+	Type          string  `json:"type"`
+	Currency      string  `json:"currency"`
+	Balance       float64 `json:"balance"`
+	Status        string  `json:"status"`
+}
+
+type CustomerAccountsResponse struct {
+	Status  string            `json:"status"`
+	Message string            `json:"message"`
+	Data    []CustomerAccount `json:"data"`
+}
+
+func (c *Client) GetCustomerAccounts(ctx context.Context, customerID string) (*CustomerAccountsResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/customers/"+customerID+"/accounts", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("mono-sec-key", c.secretKey)
+	httpReq.Header.Set("accept", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		var apiErr struct{ Message string `json:"message"` }
+		_ = json.Unmarshal(raw, &apiErr)
+		return nil, fmt.Errorf("mono API error %d: %s", resp.StatusCode, apiErr.Message)
+	}
+
+	var result CustomerAccountsResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w (body: %s)", err, string(raw))
+	}
 	return &result, nil
 }
 

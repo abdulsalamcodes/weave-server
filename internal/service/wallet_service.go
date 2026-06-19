@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -20,25 +21,32 @@ var (
 )
 
 type WalletService struct {
-	walletRepo     repository.WalletRepository
-	userRepo       repository.UserRepository
-	paystack       *paystack.Client
+	walletRepo      repository.WalletRepository
+	userRepo        repository.UserRepository
+	paystack        *paystack.Client
 	paystackEnabled bool
-	logger         *slog.Logger
+	paystackBank    string
+	logger          *slog.Logger
 }
 
 func NewWalletService(
 	walletRepo repository.WalletRepository,
 	userRepo repository.UserRepository,
 	paystackClient *paystack.Client,
+	paystackBank string,
 	logger *slog.Logger,
 ) *WalletService {
+	bank := paystackBank
+	if bank == "" {
+		bank = "test-bank"
+	}
 	return &WalletService{
-		walletRepo:    walletRepo,
-		userRepo:      userRepo,
-		paystack:      paystackClient,
+		walletRepo:      walletRepo,
+		userRepo:        userRepo,
+		paystack:        paystackClient,
 		paystackEnabled: paystackClient != nil,
-		logger:        logger,
+		paystackBank:    bank,
+		logger:          logger,
 	}
 }
 
@@ -149,6 +157,10 @@ func (s *WalletService) ReleaseHold(ctx context.Context, walletID uuid.UUID, amo
 	return nil
 }
 
+func (s *WalletService) GetWalletAccount(ctx context.Context, userID uuid.UUID) (*model.WalletAccount, error) {
+	return s.walletRepo.GetWalletAccountByUserID(ctx, userID)
+}
+
 func (s *WalletService) IssueWalletAccount(ctx context.Context, userID uuid.UUID) (*model.WalletAccount, error) {
 	existing, err := s.walletRepo.GetWalletAccountByUserID(ctx, userID)
 	if err != nil {
@@ -175,18 +187,19 @@ func (s *WalletService) IssueWalletAccount(ctx context.Context, userID uuid.UUID
 		email = user.Phone + "@weave.ng"
 	}
 
-	// Create customer on Paystack
+	firstName, lastName := splitName(user.FullName)
 	customer, err := s.paystack.CreateCustomer(ctx, &paystack.CreateCustomerRequest{
-		Email: email,
-		Phone: user.Phone,
-		Name:  user.FullName,
+		Email:     email,
+		Phone:     user.Phone,
+		FirstName: firstName,
+		LastName:  lastName,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create paystack customer: %w", err)
 	}
 
-	// Assign dedicated virtual account (Wema Bank)
-	dva, err := s.paystack.AssignDVA(ctx, customer.Data.CustomerCode, "wema")
+	// Assign dedicated virtual account
+	dva, err := s.paystack.AssignDVA(ctx, customer.Data.CustomerCode, s.paystackBank)
 	if err != nil {
 		return nil, fmt.Errorf("assign dva: %w", err)
 	}
@@ -365,4 +378,15 @@ func (e *SourcingEngine) BuildDebitPlan(ctx context.Context, userID uuid.UUID, a
 
 	plan.Total = amount
 	return plan, nil
+}
+
+func splitName(full string) (first, last string) {
+	parts := strings.Fields(full)
+	if len(parts) == 0 {
+		return "User", "Unknown"
+	}
+	if len(parts) == 1 {
+		return parts[0], parts[0]
+	}
+	return parts[0], strings.Join(parts[1:], " ")
 }

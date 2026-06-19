@@ -11,7 +11,6 @@ import (
 
 	"github.com/abdulsalamcodes/weave-server/internal/model"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/mono"
-	"github.com/abdulsalamcodes/weave-server/internal/provider/okra"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 )
 
@@ -30,7 +29,6 @@ type TransferService struct {
 	sourcingEng   *SourcingEngine
 	payoutService *PayoutService
 	monoClient    *mono.Client
-	okraClient    *okra.Client
 	pool          *pgxpool.Pool
 	logger        *slog.Logger
 }
@@ -43,7 +41,6 @@ func NewTransferService(
 	sourcingEng *SourcingEngine,
 	payoutService *PayoutService,
 	monoClient *mono.Client,
-	okraClient *okra.Client,
 	pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) *TransferService {
@@ -55,7 +52,6 @@ func NewTransferService(
 		sourcingEng:   sourcingEng,
 		payoutService: payoutService,
 		monoClient:    monoClient,
-		okraClient:    okraClient,
 		pool:          pool,
 		logger:        logger,
 	}
@@ -339,23 +335,6 @@ func (s *TransferService) executeBankDebit(ctx context.Context, bank *model.Bank
 		})
 		if err != nil {
 			return fmt.Errorf("mono direct debit failed: %w", err)
-		}
-		return nil
-
-	case "okra":
-		if s.okraClient == nil {
-			return fmt.Errorf("okra client not configured")
-		}
-		_, err := s.okraClient.InitiatePayment(ctx, &okra.PaymentRequest{
-			Amount:          leg.Amount.NGN(),
-			AccountID:       bank.ProviderToken,
-			RecipientAccount: bank.AccountNumber,
-			RecipientBank:   bank.BankCode,
-			Narration:       fmt.Sprintf("Weave transfer %s", legRef),
-			Reference:       legRef,
-		})
-		if err != nil {
-			return fmt.Errorf("okra payment failed: %w", err)
 		}
 		return nil
 

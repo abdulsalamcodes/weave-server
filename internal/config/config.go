@@ -14,7 +14,6 @@ type Config struct {
 	JWT       JWTConfig
 	Auth      AuthConfig
 	Paystack  PaystackConfig
-	Okra      OkraConfig
 	Mono      MonoConfig
 	LLM       LLMConfig
 	KYC       KYCConfig
@@ -52,11 +51,7 @@ type AuthConfig struct {
 type PaystackConfig struct {
 	SecretKey string
 	PublicKey string
-}
-
-type OkraConfig struct {
-	ClientID string
-	Secret   string
+	Bank      string
 }
 
 type MonoConfig struct {
@@ -64,8 +59,9 @@ type MonoConfig struct {
 }
 
 type LLMConfig struct {
-	APIKey string
-	Model  string
+	APIKey  string
+	Model   string
+	BaseURL string // override for Ollama: http://localhost:11434/v1
 }
 
 type KYCConfig struct {
@@ -152,17 +148,15 @@ func Load() (*Config, error) {
 		Paystack: PaystackConfig{
 			SecretKey: env("PAYSTACK_SECRET_KEY", ""),
 			PublicKey: env("PAYSTACK_PUBLIC_KEY", ""),
-		},
-		Okra: OkraConfig{
-			ClientID: env("OKRA_CLIENT_ID", ""),
-			Secret:   env("OKRA_SECRET", ""),
+			Bank:      env("PAYSTACK_BANK", "test-bank"),
 		},
 		Mono: MonoConfig{
 			SecretKey: env("MONO_SECRET_KEY", ""),
 		},
 		LLM: LLMConfig{
-			APIKey: env("LLM_API_KEY", ""),
-			Model:  env("LLM_MODEL", "gpt-4o-mini"),
+			APIKey:  env("LLM_API_KEY", ""),
+			Model:   env("LLM_MODEL", "llama3.2"),
+			BaseURL: env("LLM_BASE_URL", "http://localhost:11434/v1"),
 		},
 		KYC: KYCConfig{
 			Provider:        env("KYC_PROVIDER", "youverify"),

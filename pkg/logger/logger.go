@@ -13,12 +13,14 @@ type ctxKey string
 const requestIDKey ctxKey = "request_id"
 
 func New(level string) *slog.Logger {
+	return NewWithFormat(level, os.Getenv("LOG_FORMAT"))
+}
+
+func NewWithFormat(level, format string) *slog.Logger {
 	var l slog.Level
 	switch level {
 	case "debug":
 		l = slog.LevelDebug
-	case "info":
-		l = slog.LevelInfo
 	case "warn":
 		l = slog.LevelWarn
 	case "error":
@@ -27,11 +29,18 @@ func New(level string) *slog.Logger {
 		l = slog.LevelInfo
 	}
 
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	opts := &slog.HandlerOptions{
 		Level:       l,
 		AddSource:   true,
 		ReplaceAttr: replaceAttr,
-	})
+	}
+
+	var handler slog.Handler
+	if format == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	} else {
+		handler = newPrettyHandler(os.Stdout, opts)
+	}
 
 	return slog.New(handler)
 }
