@@ -290,10 +290,10 @@ func TestTransferHandler_Integration(t *testing.T) {
 	wallet := &model.Wallet{UserID: user.ID, Balance: 10_000_000, LedgerBalance: 10_000_000, Currency: "NGN"}
 	walletRepo.Create(context.Background(), wallet)
 
-	walletSvc := service.NewWalletService(walletRepo, userRepo, nil, newTestLogger())
-	engine := service.NewSourcingEngine(walletSvc, bankRepo, newTestLogger())
+	walletSvc := service.NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
+	engine := service.NewSourcingEngine(walletSvc, bankRepo, nil, nil, newTestLogger())
 	payoutSvc := service.NewPayoutService(nil, newTestLogger())
-	transferSvc := service.NewTransferService(txnRepo, walletRepo, bankRepo, walletSvc, engine, payoutSvc, nil, nil, nil, newTestLogger())
+	transferSvc := service.NewTransferService(txnRepo, walletRepo, bankRepo, nil, walletSvc, engine, payoutSvc, nil, nil, newTestLogger())
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {

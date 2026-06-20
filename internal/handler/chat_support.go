@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -18,40 +17,112 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 )
 
-// --- Keyword shortcut ---
+// --- Agent system prompt ---
 
-// keywordIntent maps unambiguous single-word/phrase inputs directly to an intent,
-// bypassing the LLM entirely. Returns nil to signal "fall through to LLM".
-func keywordIntent(msg string) *llm.ParsedIntent {
-	var intent llm.Intent
-	switch strings.ToLower(strings.TrimSpace(msg)) {
-	case "help", "?", "commands", "what can you do", "what can i do here":
-		intent = llm.IntentHelp
-	case "balance", "my balance", "check balance", "wallet", "wallet balance":
-		intent = llm.IntentCheckBal
-	case "banks", "my banks", "linked banks", "accounts", "my accounts":
-		intent = llm.IntentListBanks
-	case "history", "transfers", "recent transfers", "my transfers":
-		intent = llm.IntentTxHistory
-	case "yes", "confirm", "ok", "okay", "proceed", "go ahead", "do it", "sure", "yep", "yh", "yeah", "alright":
-		intent = llm.IntentConfirmTx
-	case "no", "cancel", "stop", "abort", "nevermind", "nope", "don't":
-		intent = llm.IntentCancelTx
-	default:
-		return nil
+// buildAgentPrompt constructs the system prompt injected at the start of every
+// agent loop. It carries the always-resident L1 user state (wallet, banks,
+// pending action, virtual account) so the agent never has to call a tool just
+// to know the user's current situation.
+func (h *ChatHandler) buildAgentPrompt(ctx context.Context, userID uuid.UUID) string {
+	var (
+		wg      sync.WaitGroup
+		wallet  struct{ avail, total float64; ok bool }
+		banks   []model.BankAccount
+		acct    struct{ number, bank, name string; ok bool }
+	)
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		if w, err := h.walletService.GetBalance(ctx, userID); err == nil {
+			wallet = struct{ avail, total float64; ok bool }{w.LedgerBalance.NGN(), w.Balance.NGN(), true}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		b, _ := h.bankRepo.GetByUserID(ctx, userID, 10, 0)
+		banks = b
+	}()
+	go func() {
+		defer wg.Done()
+		if a, err := h.walletService.GetWalletAccount(ctx, userID); err == nil && a != nil {
+			acct = struct{ number, bank, name string; ok bool }{a.AccountNumber, a.BankName, a.AccountName, true}
+		}
+	}()
+	wg.Wait()
+
+	var state strings.Builder
+
+	if wallet.ok {
+		state.WriteString(fmt.Sprintf("WALLET: ₦%.2f available (₦%.2f total)\n", wallet.avail, wallet.total))
 	}
-	return &llm.ParsedIntent{Intent: intent, Raw: msg, Confidence: 1.0}
-}
 
-// --- Formatting helpers ---
+	if len(banks) > 0 {
+		state.WriteString(fmt.Sprintf("LINKED BANKS (%d):\n", len(banks)))
+		for _, b := range banks {
+			status := "active+verified"
+			if !b.IsActive {
+				status = "inactive"
+			} else if !b.IsVerified {
+				status = "active,not-verified"
+			}
+			state.WriteString(fmt.Sprintf("  • %s [%s] ₦%s priority=%d status=%s\n",
+				b.BankName, b.AccountNumber, formatAmount(b.LastBalance), b.Priority, status))
+		}
+	} else {
+		state.WriteString("LINKED BANKS: none\n")
+	}
 
-func formatAmount(a model.Amount) string {
-	return fmt.Sprintf("%.2f", a.NGN())
-}
+	if action, ok := h.loadPending(ctx, userID); ok {
+		switch action.Kind {
+		case kindTransfer:
+			t := action.Transfer
+			state.WriteString(fmt.Sprintf(
+				"\nPENDING TRANSFER (awaiting user confirmation):\n"+
+					"  Amount: ₦%.2f  To: %s  Bank: %s  Name: %s\n",
+				float64(t.Amount)/100, t.RecipientAccount, t.RecipientBank, t.RecipientName,
+			))
+		case kindUnlink:
+			u := action.Unlink
+			state.WriteString(fmt.Sprintf(
+				"\nPENDING UNLINK (awaiting user confirmation): %s (%s)\n",
+				u.BankName, u.AccountNumber,
+			))
+		}
+	}
 
-func hashMessage(msg string) string {
-	h := sha256.Sum256([]byte(msg))
-	return hex.EncodeToString(h[:16])
+	if acct.ok {
+		state.WriteString(fmt.Sprintf("VIRTUAL ACCOUNT: %s at %s (name: %s)\n", acct.number, acct.bank, acct.name))
+	} else {
+		state.WriteString("VIRTUAL ACCOUNT: not yet created\n")
+	}
+
+	return `You are Weave, an intelligent Nigerian banking assistant. You help users manage their money through natural conversation.
+
+TOOLS: Use the provided tools to fetch real data and perform actions. Never fabricate balances, transfer references, or account names.
+
+IMPORTANT: CURRENT USER STATE (at the bottom of this prompt) reflects the live database right now. Always trust it over anything said earlier in the conversation. If a bank shows status=active+verified, it IS usable — do not contradict this based on past errors in chat history.
+
+MONEY MOVEMENT RULES — follow these strictly:
+1. When a user wants to send money, call initiate_transfer to build the plan.
+2. Present the plan clearly and ask for explicit confirmation before proceeding.
+3. Only call confirm_transfer after the user says yes, proceed, confirm, or similar.
+4. If the user says no, cancel, or abort — call cancel_transfer.
+5. For unlink requests, call initiate_unlink first, then confirm_unlink after user confirmation.
+
+MULTI-STEP REASONING: You can call multiple tools in sequence. For example:
+- "send to the same person I sent to last week" → call get_transfer_history first, extract the recipient, then initiate_transfer.
+- "do I have enough to send 10000?" → call get_wallet_balance and get_linked_banks, reason about the total, then answer.
+- "look up 0123456789 at GTBank then send them 5000" → call lookup_account first, then initiate_transfer with the resolved name.
+
+FORMATTING:
+- Amounts: ₦5,000.00 format with comma separators.
+- Always include the transfer reference (WVF-xxx) when a transfer completes.
+- Keep responses concise — this is a mobile chat UI.
+- Use emoji sparingly but meaningfully (✅ for success, ❌ for failure, ⚠️ for warnings).
+
+CURRENT USER STATE:
+` + state.String()
 }
 
 // --- Pending action store ---
@@ -88,15 +159,31 @@ func (h *ChatHandler) clearPending(ctx context.Context, userID uuid.UUID) {
 // --- Conversation history ---
 
 func (h *ChatHandler) loadHistory(ctx context.Context, userID uuid.UUID) []llm.Message {
-	if h.rdb == nil {
+	// Try Redis first (warm cache).
+	if h.rdb != nil {
+		raw, err := h.rdb.Get(ctx, historyKey(userID)).Bytes()
+		if err == nil {
+			var msgs []llm.Message
+			if json.Unmarshal(raw, &msgs) == nil && len(msgs) > 0 {
+				return msgs
+			}
+		}
+	}
+
+	// Redis miss — rebuild from DB.
+	if h.chatRepo == nil {
 		return nil
 	}
-	raw, err := h.rdb.Get(ctx, historyKey(userID)).Bytes()
-	if err != nil {
+	rows, err := h.chatRepo.RecentAsLLMMessages(ctx, userID, maxHistoryMessages)
+	if err != nil || len(rows) == 0 {
 		return nil
 	}
-	var msgs []llm.Message
-	_ = json.Unmarshal(raw, &msgs)
+	msgs := make([]llm.Message, 0, len(rows))
+	for _, r := range rows {
+		msgs = append(msgs, llm.Message{Role: r.Role, Content: r.Content})
+	}
+	// Re-warm Redis so next request hits cache.
+	h.saveHistory(ctx, userID, msgs)
 	return msgs
 }
 
@@ -109,106 +196,6 @@ func (h *ChatHandler) saveHistory(ctx context.Context, userID uuid.UUID, msgs []
 	}
 	data, _ := json.Marshal(msgs)
 	h.rdb.Set(ctx, historyKey(userID), data, 2*time.Hour)
-}
-
-// --- L1 system context ---
-
-// buildSystemContext assembles always-resident user state injected into every LLM call.
-// All three data sources are fetched in parallel to minimise latency.
-func (h *ChatHandler) buildSystemContext(ctx context.Context, userID uuid.UUID) string {
-	type walletRes struct {
-		balance       model.Amount
-		ledgerBalance model.Amount
-		ok            bool
-	}
-	type banksRes struct {
-		banks []model.BankAccount
-	}
-	type acctRes struct {
-		number  string
-		bank    string
-		name    string
-		ok      bool
-	}
-
-	var (
-		wg      sync.WaitGroup
-		walletR walletRes
-		banksR  banksRes
-		acctR   acctRes
-	)
-
-	wg.Add(3)
-
-	go func() {
-		defer wg.Done()
-		if w, err := h.walletService.GetBalance(ctx, userID); err == nil {
-			walletR = walletRes{balance: w.Balance, ledgerBalance: w.LedgerBalance, ok: true}
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		if b, err := h.bankRepo.GetByUserID(ctx, userID, 10, 0); err == nil {
-			banksR = banksRes{banks: b}
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		if a, err := h.walletService.GetWalletAccount(ctx, userID); err == nil && a != nil {
-			acctR = acctRes{number: a.AccountNumber, bank: a.BankName, name: a.AccountName, ok: true}
-		}
-	}()
-
-	wg.Wait()
-
-	var sb strings.Builder
-
-	if walletR.ok {
-		sb.WriteString(fmt.Sprintf("WALLET: ₦%s available (₦%s total)\n",
-			formatAmount(walletR.ledgerBalance), formatAmount(walletR.balance)))
-	}
-
-	if len(banksR.banks) > 0 {
-		sb.WriteString(fmt.Sprintf("LINKED BANKS (%d):\n", len(banksR.banks)))
-		for _, b := range banksR.banks {
-			sb.WriteString(fmt.Sprintf("  • %s [%s] ₦%s priority=%d\n",
-				b.BankName, b.AccountNumber, formatAmount(b.LastBalance), b.Priority))
-		}
-	} else {
-		sb.WriteString("LINKED BANKS: none\n")
-	}
-
-	if action, ok := h.loadPending(ctx, userID); ok {
-		switch action.Kind {
-		case kindTransfer:
-			t := action.Transfer
-			sb.WriteString(fmt.Sprintf(
-				"\nPENDING TRANSFER (awaiting confirmation):\n  Amount: ₦%.2f  To: %s  Bank: %s  Name: %s\n"+
-					"  → Affirmative = confirm_transfer\n"+
-					"  → Negative = cancel_transfer\n",
-				float64(t.Amount)/100, t.RecipientAccount, t.RecipientBank, t.RecipientName,
-			))
-		case kindUnlink:
-			u := action.Unlink
-			sb.WriteString(fmt.Sprintf(
-				"\nPENDING UNLINK (awaiting confirmation): %s (%s)\n"+
-					"  → Affirmative = confirm_transfer\n"+
-					"  → Negative = cancel_transfer\n",
-				u.BankName, u.AccountNumber,
-			))
-		}
-	}
-
-	if acctR.ok {
-		sb.WriteString(fmt.Sprintf("VIRTUAL ACCOUNT: %s at %s (name: %s)\n",
-			acctR.number, acctR.bank, acctR.name))
-	} else {
-		sb.WriteString("VIRTUAL ACCOUNT: not yet created\n")
-	}
-
-	return sb.String()
 }
 
 // --- Bank lookup helpers ---
@@ -239,22 +226,22 @@ func resolveBankCode(banks []paystack.Bank, name string) string {
 	return ""
 }
 
-// --- capturingResponseWriter ---
+// --- Formatting helpers ---
 
-// capturingResponseWriter wraps http.ResponseWriter to capture the response body
-// so the chat handler can save the assistant's reply to conversation history.
-type capturingResponseWriter struct {
-	http.ResponseWriter
-	body       []byte
-	statusCode int
+func formatAmount(a model.Amount) string {
+	return fmt.Sprintf("%.2f", a.NGN())
 }
 
-func (c *capturingResponseWriter) WriteHeader(code int) {
-	c.statusCode = code
-	c.ResponseWriter.WriteHeader(code)
+func hashMessage(msg string) string {
+	h := sha256.Sum256([]byte(msg))
+	return hex.EncodeToString(h[:16])
 }
 
-func (c *capturingResponseWriter) Write(b []byte) (int, error) {
-	c.body = append(c.body, b...)
-	return c.ResponseWriter.Write(b)
+// normalizeToMap round-trips v through JSON to produce a plain
+// map[string]interface{} suitable for generic formatters.
+func normalizeToMap(v interface{}) map[string]interface{} {
+	b, _ := json.Marshal(v)
+	var m map[string]interface{}
+	_ = json.Unmarshal(b, &m)
+	return m
 }

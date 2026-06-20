@@ -140,7 +140,6 @@ func (c *Client) ExchangeCode(ctx context.Context, code string) (*ExchangeRespon
 // --- Customer Accounts ---
 
 type CustomerAccount struct {
-	ID            string  `json:"id"`
 	BVN           string  `json:"bvn"`
 	AccountNumber string  `json:"account_number"`
 	AuthMethod    string  `json:"auth_method"`
@@ -173,6 +172,7 @@ func (c *Client) GetCustomerAccounts(ctx context.Context, customerID string) (*C
 	defer resp.Body.Close()
 
 	raw, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode >= 400 {
 		var apiErr struct{ Message string `json:"message"` }
 		_ = json.Unmarshal(raw, &apiErr)
@@ -255,6 +255,22 @@ func parseResponse[T any](resp *http.Response, err error) (*T, error) {
 
 	raw, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode >= 400 {
+		var apiErr struct {
+			Message string `json:"message"`
+			Error   string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &apiErr)
+		msg := apiErr.Message
+		if msg == "" {
+			msg = apiErr.Error
+		}
+		if msg == "" {
+			msg = string(raw)
+		}
+		return nil, fmt.Errorf("mono API error %d: %s", resp.StatusCode, msg)
+	}
+
 	var result T
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("decode: %w (body: %s)", err, string(raw))
@@ -273,39 +289,49 @@ func (c *Client) VerifyWebhook(signature string, body []byte) bool {
 	return hmac.Equal([]byte(signature), []byte(expected))
 }
 
-// --- Direct Debit ---
+// --- Payments (DirectPay) ---
 
-type DirectDebitRequest struct {
-	Amount    float64 `json:"amount"`
-	Narration string  `json:"narration"`
-	Reference string  `json:"reference"`
+type PaymentInitiateRequest struct {
+	Amount      int64  `json:"amount"` // in kobo (smallest currency unit)
+	Type        string `json:"type"`   // "onetime-debit"
+	Description string `json:"description"`
+	Reference   string `json:"reference"` // min 10 chars
+	RedirectURL string `json:"redirect_url"`
+	Method      string `json:"method,omitempty"` // "account", "transfer", or "whatsapp"
+	Customer    struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	} `json:"customer"`
 }
 
-type DirectDebitResponse struct {
+type PaymentInitiateResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message"`
 	Data    struct {
-		ID              string `json:"id"`
-		Amount          int    `json:"amount"`
-		Status          string `json:"status"`
-		Reference       string `json:"reference"`
-		TransactionDate string `json:"transactionDate"`
+		ID        string `json:"id"`
+		Reference string `json:"reference"`
+		Amount    int64  `json:"amount"`
+		Status    string `json:"status"`
+		MonoURL   string `json:"mono_url"`
+		Type      string `json:"type"`
 	} `json:"data"`
 }
 
-func (c *Client) DirectDebit(ctx context.Context, accountID string, req DirectDebitRequest) (*DirectDebitResponse, error) {
+// PaymentInitiate creates a DirectPay session. The user must visit PaymentURL
+// to authorize the debit. Mono fires a "payment.successful" webhook on completion.
+// Requires DirectPay access enabled on the Mono dashboard (Payments tab).
+func (c *Client) PaymentInitiate(ctx context.Context, req PaymentInitiateRequest) (*PaymentInitiateResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/accounts/"+accountID+"/direct-debit", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/payments/initiate", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("mono-sec-key", c.secretKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
-	return parseResponse[DirectDebitResponse](resp, err)
+	return parseResponse[PaymentInitiateResponse](c.httpClient.Do(httpReq))
 }

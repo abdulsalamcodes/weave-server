@@ -20,29 +20,33 @@ import (
 	"github.com/abdulsalamcodes/weave-server/internal/model"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/mono"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
+	"github.com/abdulsalamcodes/weave-server/internal/service"
 )
 
 type BankHandler struct {
-	bankRepo   repository.BankAccountRepository
-	userRepo   repository.UserRepository
-	monoClient *mono.Client
-	rdb        *redis.Client
-	logger     *slog.Logger
+	bankRepo      repository.BankAccountRepository
+	userRepo      repository.UserRepository
+	walletService *service.WalletService
+	monoClient    *mono.Client
+	rdb           *redis.Client
+	logger        *slog.Logger
 }
 
 func NewBankHandler(
 	bankRepo repository.BankAccountRepository,
 	userRepo repository.UserRepository,
+	walletService *service.WalletService,
 	monoClient *mono.Client,
 	rdb *redis.Client,
 	logger *slog.Logger,
 ) *BankHandler {
 	return &BankHandler{
-		bankRepo:   bankRepo,
-		userRepo:   userRepo,
-		monoClient: monoClient,
-		rdb:        rdb,
-		logger:     logger,
+		bankRepo:      bankRepo,
+		userRepo:      userRepo,
+		walletService: walletService,
+		monoClient:    monoClient,
+		rdb:           rdb,
+		logger:        logger,
 	}
 }
 
@@ -101,6 +105,10 @@ func (h *BankHandler) InitiateLink(w http.ResponseWriter, r *http.Request) {
 		// Store ref → customer_id in Redis for 30 minutes
 		if h.rdb != nil {
 			customerID := result.Data.Customer
+			h.logger.Info("mono connect initiated", "ref", ref, "customer_id", customerID)
+			if customerID == "" {
+				h.logger.Warn("mono returned empty customer_id — CompleteLink will fail for this ref", "ref", ref)
+			}
 			h.rdb.Set(context.Background(), "mono:ref:"+ref, customerID, 30*time.Minute)
 		}
 		respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -144,28 +152,32 @@ func (h *BankHandler) CompleteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accounts, err := h.monoClient.GetCustomerAccounts(r.Context(), customerID)
-	if err != nil {
-		h.logger.Error("get customer accounts failed", "error", err)
-		respondErrorMsg(w, http.StatusInternalServerError, "fetch_accounts_failed", err.Error())
+	if customerID == "" {
+		h.logger.Error("customer_id is empty for ref", "ref", req.Ref)
+		respondErrorMsg(w, http.StatusBadRequest, "invalid_session", "Bank linking session is invalid — please try linking again.")
 		return
 	}
 
+	accounts, err := h.monoClient.GetCustomerAccounts(r.Context(), customerID)
+	if err != nil {
+		h.logger.Error("get customer accounts failed", "customer_id", customerID, "error", err)
+		respondErrorMsg(w, http.StatusBadGateway, "fetch_accounts_failed", err.Error())
+		return
+	}
+
+	h.logger.Info("mono customer accounts fetched", "customer_id", customerID, "count", len(accounts.Data))
+
 	if len(accounts.Data) == 0 {
-		respondError(w, http.StatusNotFound, "no_accounts_found")
+		respondErrorMsg(w, http.StatusNotFound, "no_accounts_found", "No accounts were found for this bank link. Try unlinking and re-linking.")
 		return
 	}
 
 	var saved []model.BankAccount
 	for _, acc := range accounts.Data {
-		providerToken := acc.ID
-		if providerToken == "" {
-			providerToken = customerID
-		}
 		bank := &model.BankAccount{
 			UserID:        userID,
 			Provider:      "mono",
-			ProviderToken: providerToken,
+			ProviderToken: customerID,
 			AccountNumber: acc.AccountNumber,
 			AccountName:   acc.AccountName,
 			BankCode:      "",
@@ -176,7 +188,7 @@ func (h *BankHandler) CompleteLink(w http.ResponseWriter, r *http.Request) {
 			IsVerified:    true,
 		}
 		if err := h.bankRepo.Create(r.Context(), bank); err != nil {
-			h.logger.Error("save bank account failed", "error", err)
+			h.logger.Error("save bank account failed", "account_number", acc.AccountNumber, "error", err)
 			continue
 		}
 		saved = append(saved, *bank)
@@ -184,6 +196,12 @@ func (h *BankHandler) CompleteLink(w http.ResponseWriter, r *http.Request) {
 
 	h.rdb.Del(r.Context(), "mono:ref:"+req.Ref)
 	h.logger.Info("bank accounts linked via mono", "count", len(saved), "user_id", userID)
+
+	if len(saved) == 0 {
+		respondErrorMsg(w, http.StatusInternalServerError, "save_failed", "Accounts were found but could not be saved. Please try again.")
+		return
+	}
+
 	respondJSON(w, http.StatusOK, saved)
 }
 
@@ -249,15 +267,19 @@ func (h *BankHandler) ExchangeCode(w http.ResponseWriter, r *http.Request) {
 }
 
 type monoWebhookPayload struct {
-	Event   string `json:"event"`
-	Data    struct {
+	Event string `json:"event"`
+	Data  struct {
+		// bank linking fields
 		ID            string  `json:"id"`
 		AccountNumber string  `json:"accountNumber"`
 		AccountName   string  `json:"accountName"`
 		BankName      string  `json:"bankName"`
 		BankCode      string  `json:"bankCode"`
 		Balance       float64 `json:"balance"`
-		Reference     string  `json:"reference"`
+		// payment fields
+		Reference string  `json:"reference"`
+		Amount    float64 `json:"amount"` // in kobo
+		Status    string  `json:"status"`
 	} `json:"data"`
 }
 
@@ -284,31 +306,24 @@ func (h *BankHandler) MonoWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bank := &model.BankAccount{
-		Provider:       "mono",
-		ProviderToken:  payload.Data.ID,
-		AccountNumber:  payload.Data.AccountNumber,
-		AccountName:    payload.Data.AccountName,
-		BankCode:       payload.Data.BankCode,
-		BankName:       payload.Data.BankName,
-		LastBalance:    model.NewAmount(int64(payload.Data.Balance)),
-		Priority:       5,
-		IsActive:       true,
-		IsVerified:     true,
+	h.logger.Info("mono webhook received", "event", payload.Event)
+
+	switch payload.Event {
+	case "payment.successful":
+		ref := payload.Data.Reference
+		amountKobo := model.Amount(int64(payload.Data.Amount))
+		if err := h.walletService.CompleteFundFromBank(r.Context(), ref, amountKobo); err != nil {
+			h.logger.Error("complete fund from bank failed", "reference", ref, "error", err)
+			respondError(w, http.StatusInternalServerError, "complete_failed")
+			return
+		}
+		h.logger.Info("wallet funded via mono payment", "reference", ref, "amount_kobo", amountKobo)
+		respondJSON(w, http.StatusOK, map[string]string{"status": "success"})
+
+	default:
+		// Unrecognised events — acknowledge and ignore.
+		respondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": payload.Event})
 	}
-
-	if err := h.bankRepo.Create(r.Context(), bank); err != nil {
-		h.logger.Error("save mono account failed", "error", err)
-		respondError(w, http.StatusInternalServerError, "save_failed")
-		return
-	}
-
-	h.logger.Info("bank linked via mono",
-		"account", bank.AccountNumber,
-		"bank", bank.BankName,
-	)
-
-	respondJSON(w, http.StatusOK, map[string]string{"status": "success"})
 }
 
 func (h *BankHandler) ListBanks(w http.ResponseWriter, r *http.Request) {
@@ -417,7 +432,8 @@ func (h *BankHandler) RefreshBalance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if bank.ProviderToken == "" {
-		respondError(w, http.StatusBadRequest, "no_provider_token")
+		respondErrorMsg(w, http.StatusBadRequest, "no_provider_token",
+			"This bank account has no provider token — please unlink and re-link it to restore the connection.")
 		return
 	}
 
@@ -425,23 +441,43 @@ func (h *BankHandler) RefreshBalance(w http.ResponseWriter, r *http.Request) {
 	switch bank.Provider {
 	case "mono":
 		if h.monoClient == nil {
-			respondError(w, http.StatusServiceUnavailable, "mono_not_configured")
+			respondErrorMsg(w, http.StatusServiceUnavailable, "mono_not_configured",
+				"Bank balance refresh is temporarily unavailable.")
 			return
 		}
 		resp, err := h.monoClient.GetBalance(r.Context(), bank.ProviderToken)
 		if err != nil {
-			h.logger.Error("mono balance refresh failed", "error", err, "account_id", bank.ID)
-			respondError(w, http.StatusInternalServerError, "balance_refresh_failed")
-			return
+			// If the token is a customer ID (not an account ID), GetBalance returns 404.
+			// Fall back to GetCustomerAccounts which returns balance per account.
+			accounts, fallbackErr := h.monoClient.GetCustomerAccounts(r.Context(), bank.ProviderToken)
+			if fallbackErr != nil || len(accounts.Data) == 0 {
+				h.logger.Error("mono balance refresh failed", "error", err, "account_id", bank.ID)
+				respondErrorMsg(w, http.StatusBadGateway, "balance_refresh_failed",
+					"Could not fetch live balance from your bank — the connection may have expired. Try unlinking and re-linking.")
+				return
+			}
+			// Match by account number, or use the first account if number is missing.
+			found := accounts.Data[0]
+			for _, a := range accounts.Data {
+				if a.AccountNumber == bank.AccountNumber {
+					found = a
+					break
+				}
+			}
+			balance = found.Balance
+		} else {
+			balance = resp.Data.Balance
 		}
-		balance = resp.Data.Balance
 
 	default:
-		respondError(w, http.StatusBadRequest, "unsupported_provider")
+		respondErrorMsg(w, http.StatusBadRequest, "unsupported_provider",
+			"Balance refresh is not supported for this bank provider.")
 		return
 	}
 
-	if err := h.bankRepo.UpdateBalance(r.Context(), bank.ID, model.NewAmount(int64(balance))); err != nil {
+	// Mono returns balance already in kobo — store directly without multiplying.
+	koboBalance := model.Amount(int64(balance))
+	if err := h.bankRepo.UpdateBalance(r.Context(), bank.ID, koboBalance); err != nil {
 		h.logger.Error("update bank balance failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "update_failed")
 		return
@@ -449,7 +485,7 @@ func (h *BankHandler) RefreshBalance(w http.ResponseWriter, r *http.Request) {
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"status":       "refreshed",
-		"last_balance": model.NewAmount(int64(balance)),
+		"last_balance": koboBalance,
 	})
 }
 

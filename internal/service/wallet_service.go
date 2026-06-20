@@ -6,23 +6,43 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/abdulsalamcodes/weave-server/internal/model"
+	"github.com/abdulsalamcodes/weave-server/internal/provider/mono"
 	"github.com/abdulsalamcodes/weave-server/internal/provider/paystack"
 	"github.com/abdulsalamcodes/weave-server/internal/repository"
 )
 
 var (
-	ErrWalletNotFound    = errors.New("wallet not found")
-	ErrInsufficientFunds = errors.New("insufficient funds")
-	ErrNoWalletAccount   = errors.New("no wallet account found")
+	ErrWalletNotFound      = errors.New("wallet not found")
+	ErrInsufficientFunds   = errors.New("insufficient funds")
+	ErrNoWalletAccount     = errors.New("no wallet account found")
+	ErrAmountTooSmall      = errors.New("amount below minimum")
+	ErrAmountTooLarge      = errors.New("amount above maximum")
+	ErrDailyLimitExceeded  = errors.New("daily top-up limit exceeded")
+	ErrBankNotActive       = errors.New("bank account not active or verified")
+	ErrMonoUnavailable     = errors.New("mono client not configured")
+	ErrDirectDebitFailed   = errors.New("direct debit initiation failed")
+	ErrForbidden           = errors.New("resource not owned by user")
+)
+
+const (
+	fundFromBankMinKobo   model.Amount = 10_000      // ₦100
+	fundFromBankMaxKobo   model.Amount = 50_000_000  // ₦500,000 per request
+	fundFromBankDailyKobo model.Amount = 100_000_000 // ₦1,000,000 daily limit
 )
 
 type WalletService struct {
 	walletRepo      repository.WalletRepository
 	userRepo        repository.UserRepository
+	bankRepo        repository.BankAccountRepository
+	bankFundRepo    repository.BankFundRepository
+	auditRepo       *repository.AuditLogRepo
+	monoClient      *mono.Client
 	paystack        *paystack.Client
 	paystackEnabled bool
 	paystackBank    string
@@ -34,6 +54,10 @@ func NewWalletService(
 	userRepo repository.UserRepository,
 	paystackClient *paystack.Client,
 	paystackBank string,
+	bankRepo repository.BankAccountRepository,
+	bankFundRepo repository.BankFundRepository,
+	auditRepo *repository.AuditLogRepo,
+	monoClient *mono.Client,
 	logger *slog.Logger,
 ) *WalletService {
 	bank := paystackBank
@@ -43,6 +67,10 @@ func NewWalletService(
 	return &WalletService{
 		walletRepo:      walletRepo,
 		userRepo:        userRepo,
+		bankRepo:        bankRepo,
+		bankFundRepo:    bankFundRepo,
+		auditRepo:       auditRepo,
+		monoClient:      monoClient,
 		paystack:        paystackClient,
 		paystackEnabled: paystackClient != nil,
 		paystackBank:    bank,
@@ -280,6 +308,156 @@ func (s *WalletService) ProcessDepositWebhook(ctx context.Context, accountNumber
 	return nil
 }
 
+// FundFromBank initiates a Mono DirectPay session. Returns the pending request including
+// a PaymentURL the user must visit to authorise the debit. Mono fires "payment.successful"
+// on completion, which triggers CompleteFundFromBank to credit the wallet.
+func (s *WalletService) FundFromBank(ctx context.Context, userID uuid.UUID, bankAccountID uuid.UUID, amount model.Amount) (*model.BankFundRequest, error) {
+	if amount < fundFromBankMinKobo {
+		return nil, ErrAmountTooSmall
+	}
+	if amount > fundFromBankMaxKobo {
+		return nil, ErrAmountTooLarge
+	}
+
+	// Ownership + activity check.
+	ba, err := s.bankRepo.GetByID(ctx, bankAccountID)
+	if err != nil {
+		return nil, fmt.Errorf("get bank account: %w", err)
+	}
+	if ba == nil || ba.UserID != userID {
+		return nil, ErrForbidden
+	}
+	if !ba.IsActive || !ba.IsVerified {
+		return nil, ErrBankNotActive
+	}
+
+	// Daily limit check.
+	todaySum, err := s.bankFundRepo.SumCompletedToday(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("check daily limit: %w", err)
+	}
+	if todaySum+amount > fundFromBankDailyKobo {
+		return nil, ErrDailyLimitExceeded
+	}
+
+	ref := fmt.Sprintf("WVF-FUND-%s", generateShortID())
+
+	req := &model.BankFundRequest{
+		UserID:        userID,
+		BankAccountID: bankAccountID,
+		Reference:     ref,
+		Amount:        amount,
+		Status:        model.BankFundStatusPending,
+	}
+	if err := s.bankFundRepo.Create(ctx, req); err != nil {
+		return nil, fmt.Errorf("create fund request: %w", err)
+	}
+
+	uid := userID
+	s.writeAudit(ctx, &uid, "fund_from_bank_initiated", "ok", map[string]any{
+		"reference":    ref,
+		"amount_ngn":   amount.NGN(),
+		"bank_account": bankAccountID,
+		"bank_name":    ba.BankName,
+	})
+
+	if s.monoClient == nil {
+		_ = s.bankFundRepo.UpdateStatus(ctx, ref, model.BankFundStatusFailed, "", "mono client not configured")
+		s.writeAudit(ctx, &uid, "fund_from_bank_failed", "failed", map[string]any{"reference": ref, "reason": "mono_unavailable"})
+		return nil, ErrMonoUnavailable
+	}
+
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil || user == nil {
+		_ = s.bankFundRepo.UpdateStatus(ctx, ref, model.BankFundStatusFailed, "", "user not found")
+		return nil, fmt.Errorf("user not found")
+	}
+	email := user.Email
+	if email == "" {
+		email = user.Phone + "@weave.ng"
+	}
+
+	payReq := mono.PaymentInitiateRequest{
+		Amount:      int64(amount), // already in kobo
+		Type:        "onetime-debit",
+		Method:      "account",
+		Description: fmt.Sprintf("Weave wallet top-up — %s", ref),
+		Reference:   ref,
+		RedirectURL: "http://localhost:3000/app/accounts",
+	}
+	payReq.Customer.Name = user.FullName
+	payReq.Customer.Email = email
+
+	s.logger.Info("initiating mono payment", "reference", ref, "amount_kobo", int64(amount), "customer_email", email)
+	payResp, err := s.monoClient.PaymentInitiate(ctx, payReq)
+	if err != nil {
+		s.logger.Error("mono payment initiate failed", "reference", ref, "error", err.Error())
+		_ = s.bankFundRepo.UpdateStatus(ctx, ref, model.BankFundStatusFailed, "", err.Error())
+		s.writeAudit(ctx, &uid, "fund_from_bank_failed", "failed", map[string]any{"reference": ref, "error": err.Error()})
+		return nil, fmt.Errorf("%w: %s", ErrDirectDebitFailed, err.Error())
+	}
+	s.logger.Info("mono payment initiated", "reference", ref, "payment_id", payResp.Data.ID, "mono_url", payResp.Data.MonoURL)
+
+	providerRef := payResp.Data.ID
+	paymentURL := payResp.Data.MonoURL
+	_ = s.bankFundRepo.UpdateStatus(ctx, ref, model.BankFundStatusPending, providerRef, "")
+	req.ProviderRef = providerRef
+	req.PaymentURL = paymentURL
+	return req, nil
+}
+
+// CompleteFundFromBank credits the wallet when Mono fires payment.successful.
+// It is idempotent: a completed reference is a no-op.
+func (s *WalletService) CompleteFundFromBank(ctx context.Context, reference string, amount model.Amount) error {
+	fundReq, err := s.bankFundRepo.GetByReference(ctx, reference)
+	if err != nil {
+		return fmt.Errorf("get fund request: %w", err)
+	}
+	if fundReq == nil {
+		s.logger.Warn("fund_from_bank webhook for unknown reference", "reference", reference)
+		return nil
+	}
+	if fundReq.Status == model.BankFundStatusCompleted {
+		return nil // idempotent
+	}
+
+	wallet, err := s.walletRepo.GetByUserID(ctx, fundReq.UserID)
+	if err != nil {
+		return fmt.Errorf("get wallet: %w", err)
+	}
+
+	if err := s.CreditWallet(ctx, wallet.ID, amount, reference, "bank top-up via Mono"); err != nil {
+		uid := fundReq.UserID
+		s.writeAudit(ctx, &uid, "fund_from_bank_credit_failed", "failed", map[string]any{
+			"reference": reference, "error": err.Error(),
+		})
+		return fmt.Errorf("credit wallet: %w", err)
+	}
+
+	if err := s.bankFundRepo.UpdateStatus(ctx, reference, model.BankFundStatusCompleted, "", ""); err != nil {
+		s.logger.Error("failed to mark fund request completed", "reference", reference, "error", err)
+	}
+
+	uid := fundReq.UserID
+	s.writeAudit(ctx, &uid, "fund_from_bank_completed", "ok", map[string]any{
+		"reference":  reference,
+		"amount_ngn": amount.NGN(),
+	})
+	return nil
+}
+
+func (s *WalletService) writeAudit(ctx context.Context, userID *uuid.UUID, action, status string, meta map[string]any) {
+	if s.auditRepo == nil {
+		return
+	}
+	_ = s.auditRepo.Write(ctx, &model.AuditLog{
+		UserID:   userID,
+		Action:   action,
+		Status:   status,
+		Metadata: meta,
+	})
+}
+
 // WalletBalanceProvider is the interface SourcingEngine needs from WalletService.
 type WalletBalanceProvider interface {
 	GetBalance(ctx context.Context, userID uuid.UUID) (*model.Wallet, error)
@@ -288,21 +466,95 @@ type WalletBalanceProvider interface {
 var _ WalletBalanceProvider = (*WalletService)(nil)
 
 type SourcingEngine struct {
-	walletSvc WalletBalanceProvider
-	bankRepo  repository.BankAccountRepository
-	logger    *slog.Logger
+	walletSvc  WalletBalanceProvider
+	bankRepo   repository.BankAccountRepository
+	auditRepo  *repository.AuditLogRepo
+	monoClient *mono.Client
+	logger     *slog.Logger
 }
 
 func NewSourcingEngine(
 	walletSvc WalletBalanceProvider,
 	bankRepo repository.BankAccountRepository,
+	auditRepo *repository.AuditLogRepo,
+	monoClient *mono.Client,
 	logger *slog.Logger,
 ) *SourcingEngine {
 	return &SourcingEngine{
-		walletSvc: walletSvc,
-		bankRepo:  bankRepo,
-		logger:    logger,
+		walletSvc:  walletSvc,
+		bankRepo:   bankRepo,
+		auditRepo:  auditRepo,
+		monoClient: monoClient,
+		logger:     logger,
 	}
+}
+
+// refreshBankBalances fetches live Mono balances for all active+verified accounts
+// in parallel with a 5s timeout per fetch. On failure it falls back to the stored
+// balance and writes an audit warning. Returns a map of bankID → refreshed balance.
+func (e *SourcingEngine) refreshBankBalances(ctx context.Context, userID uuid.UUID, accounts []model.BankAccount) map[uuid.UUID]model.Amount {
+	result := make(map[uuid.UUID]model.Amount, len(accounts))
+	if e.monoClient == nil {
+		for _, a := range accounts {
+			result[a.ID] = a.LastBalance
+		}
+		return result
+	}
+
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+
+	for _, acct := range accounts {
+		if acct.Provider != "mono" || acct.ProviderToken == "" {
+			result[acct.ID] = acct.LastBalance
+			continue
+		}
+
+		wg.Add(1)
+		go func(a model.BankAccount) {
+			defer wg.Done()
+
+			fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+
+			resp, err := e.monoClient.GetBalance(fetchCtx, a.ProviderToken)
+			if err != nil {
+				e.logger.Warn("mono balance refresh failed", "bank_id", a.ID, "bank_name", a.BankName, "error", err)
+				if e.auditRepo != nil {
+					uid := userID
+					_ = e.auditRepo.Write(context.Background(), &model.AuditLog{
+						UserID: &uid,
+						Action: "balance_refresh_failed",
+						Status: "failed",
+						Metadata: map[string]any{
+							"bank_id":   a.ID,
+							"bank_name": a.BankName,
+							"error":     err.Error(),
+						},
+					})
+				}
+				mu.Lock()
+				result[a.ID] = a.LastBalance // fall back to stored value
+				mu.Unlock()
+				return
+			}
+
+			fresh := model.Amount(int64(resp.Data.Balance * 100))
+			// Update DB in background; don't block the debit plan.
+			go func() {
+				_ = e.bankRepo.UpdateBalance(context.Background(), a.ID, fresh)
+			}()
+
+			mu.Lock()
+			result[a.ID] = fresh
+			mu.Unlock()
+		}(acct)
+	}
+
+	wg.Wait()
+	return result
 }
 
 func (e *SourcingEngine) BuildDebitPlan(ctx context.Context, userID uuid.UUID, amount model.Amount) (*model.DebitPlan, error) {
@@ -335,18 +587,22 @@ func (e *SourcingEngine) BuildDebitPlan(ctx context.Context, userID uuid.UUID, a
 		return plan, nil
 	}
 
-	// 2. Check linked bank accounts (sorted by priority)
+	// 2. Check linked bank accounts (sorted by priority) with live balances.
 	accounts, err := e.bankRepo.GetByUserID(ctx, userID, 100, 0)
 	if err != nil {
 		return nil, fmt.Errorf("get bank accounts: %w", err)
 	}
+
+	// Refresh all balances from Mono in parallel before sourcing.
+	liveBalances := e.refreshBankBalances(ctx, userID, accounts)
 
 	for _, acct := range accounts {
 		if !acct.IsActive || !acct.IsVerified {
 			continue
 		}
 
-		available := acct.LastBalance - acct.MinBalance
+		balance := liveBalances[acct.ID]
+		available := balance - acct.MinBalance
 		if available <= 0 {
 			continue
 		}
@@ -378,6 +634,10 @@ func (e *SourcingEngine) BuildDebitPlan(ctx context.Context, userID uuid.UUID, a
 
 	plan.Total = amount
 	return plan, nil
+}
+
+func generateShortID() string {
+	return uuid.New().String()[:8]
 }
 
 func splitName(full string) (first, last string) {

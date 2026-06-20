@@ -146,19 +146,22 @@ func (s *Server) setupRoutes() {
 		s.db,
 		s.logger,
 	)
-	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.cfg.Paystack.Bank, s.logger)
-	sourcingEngine := service.NewSourcingEngine(walletService, bankRepo, s.logger)
+	auditRepo := repository.NewAuditLogRepo(s.db)
+	bankFundRepo := repository.NewBankFundRepo(s.db)
+	walletService := service.NewWalletService(walletRepo, userRepo, paystackClient, s.cfg.Paystack.Bank, bankRepo, bankFundRepo, auditRepo, monoClient, s.logger)
+	sourcingEngine := service.NewSourcingEngine(walletService, bankRepo, auditRepo, monoClient, s.logger)
 	payoutService := service.NewPayoutService(paystackClient, s.logger)
-	transferService := service.NewTransferService(txnRepo, walletRepo, bankRepo, walletService, sourcingEngine, payoutService, monoClient, s.db, s.logger)
+	transferService := service.NewTransferService(txnRepo, walletRepo, bankRepo, auditRepo, walletService, sourcingEngine, payoutService, monoClient, s.db, s.logger)
 
 	// Handlers
 	healthHandler := handler.NewHealthHandler()
 	authHandler := handler.NewAuthHandler(authService, s.logger)
 	walletHandler := handler.NewWalletHandler(walletService, s.logger)
 	transferHandler := handler.NewTransferHandler(transferService, txnRepo, s.logger)
-	chatHandler := handler.NewChatHandler(transferService, walletService, bankRepo, txnRepo, paystackClient, monoClient, s.rdb, llmClient, s.logger)
-	bankHandler := handler.NewBankHandler(bankRepo, userRepo, monoClient, s.rdb, s.logger)
-	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, s.logger)
+	chatRepo := repository.NewChatMessageRepo(s.db)
+	chatHandler := handler.NewChatHandler(transferService, walletService, bankRepo, txnRepo, chatRepo, paystackClient, monoClient, s.rdb, llmClient, s.logger)
+	bankHandler := handler.NewBankHandler(bankRepo, userRepo, walletService, monoClient, s.rdb, s.logger)
+	webhookHandler := handler.NewWebhookHandler(walletService, paystackClient, monoClient, s.logger)
 
 	// Routes
 	s.router.Get("/health", healthHandler.HealthCheck)

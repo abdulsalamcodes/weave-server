@@ -22,15 +22,19 @@ func NewBankAccountRepo(pool *pgxpool.Pool) *BankAccountRepo {
 func (r *BankAccountRepo) Create(ctx context.Context, ba *model.BankAccount) error {
 	err := getQuerier(ctx, r.pool).QueryRow(ctx, `
 		INSERT INTO bank_accounts (user_id, provider, provider_token, account_number,
-		                           account_name, bank_code, bank_name, priority, min_balance, last_balance)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		                           account_name, bank_code, bank_name, priority, min_balance, last_balance,
+		                           is_active, is_verified)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (user_id, account_number) DO UPDATE
-		  SET last_balance = EXCLUDED.last_balance,
-		      provider_token = EXCLUDED.provider_token,
-		      updated_at = NOW()
+		  SET last_balance    = EXCLUDED.last_balance,
+		      provider_token  = EXCLUDED.provider_token,
+		      is_active       = EXCLUDED.is_active,
+		      is_verified     = EXCLUDED.is_verified,
+		      updated_at      = NOW()
 		RETURNING id, created_at, updated_at
 	`, ba.UserID, ba.Provider, ba.ProviderToken, ba.AccountNumber,
 		ba.AccountName, ba.BankCode, ba.BankName, ba.Priority, ba.MinBalance, ba.LastBalance,
+		ba.IsActive, ba.IsVerified,
 	).Scan(&ba.ID, &ba.CreatedAt, &ba.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("create bank account: %w", err)
@@ -73,13 +77,13 @@ func (r *BankAccountRepo) GetByUserID(ctx context.Context, userID uuid.UUID, lim
 func (r *BankAccountRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.BankAccount, error) {
 	a := &model.BankAccount{}
 	err := 	getQuerier(ctx, r.pool).QueryRow(ctx, `
-		SELECT id, user_id, provider, account_number, account_name,
+		SELECT id, user_id, provider, COALESCE(provider_token,''), account_number, account_name,
 		       bank_code, bank_name, priority, min_balance,
 		       COALESCE(last_balance, 0), is_active, is_verified,
 		       created_at, updated_at
 		FROM bank_accounts WHERE id = $1
 	`, id).Scan(
-		&a.ID, &a.UserID, &a.Provider, &a.AccountNumber, &a.AccountName,
+		&a.ID, &a.UserID, &a.Provider, &a.ProviderToken, &a.AccountNumber, &a.AccountName,
 		&a.BankCode, &a.BankName, &a.Priority, &a.MinBalance,
 		&a.LastBalance, &a.IsActive, &a.IsVerified,
 		&a.CreatedAt, &a.UpdatedAt,

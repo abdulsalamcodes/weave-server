@@ -14,10 +14,10 @@ func TestTransferService_InitiateTransfer_WalletOnly(t *testing.T) {
 	txnRepo := newMockTxnRepo()
 	bankRepo := newMockBankRepo()
 	userRepo := newMockUserRepo()
-	walletSvc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
-	engine := NewSourcingEngine(walletSvc, bankRepo, newTestLogger())
+	walletSvc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
+	engine := NewSourcingEngine(walletSvc, bankRepo, nil, nil, newTestLogger())
 	payoutSvc := NewPayoutService(nil, newTestLogger())
-	svc := NewTransferService(txnRepo, walletRepo, bankRepo, walletSvc, engine, payoutSvc, nil, nil, nil, newTestLogger())
+	svc := NewTransferService(txnRepo, walletRepo, bankRepo, nil, walletSvc, engine, payoutSvc, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2349010000000", FullName: "Transfer Test", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 100000, LedgerBalance: 100000, Currency: "NGN"}
@@ -115,10 +115,10 @@ func TestTransferService_InitiateTransfer_InsufficientFunds(t *testing.T) {
 	txnRepo := newMockTxnRepo()
 	bankRepo := newMockBankRepo()
 	userRepo := newMockUserRepo()
-	walletSvc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
-	engine := NewSourcingEngine(walletSvc, bankRepo, newTestLogger())
+	walletSvc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
+	engine := NewSourcingEngine(walletSvc, bankRepo, nil, nil, newTestLogger())
 	payoutSvc := NewPayoutService(nil, newTestLogger())
-	svc := NewTransferService(txnRepo, walletRepo, bankRepo, walletSvc, engine, payoutSvc, nil, nil, nil, newTestLogger())
+	svc := NewTransferService(txnRepo, walletRepo, bankRepo, nil, walletSvc, engine, payoutSvc, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2349020000000", FullName: "Poor User", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 1000, LedgerBalance: 1000, Currency: "NGN"}

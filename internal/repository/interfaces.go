@@ -66,8 +66,24 @@ type BankAccountRepository interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
+type ChatMessageRepository interface {
+	Create(ctx context.Context, msg *model.ChatMessage) error
+	ListByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]model.ChatMessage, error)
+	DeleteByUserID(ctx context.Context, userID uuid.UUID) error
+	RecentAsLLMMessages(ctx context.Context, userID uuid.UUID, n int) ([]model.ChatMessage, error)
+}
+
+type BankFundRepository interface {
+	Create(ctx context.Context, req *model.BankFundRequest) error
+	GetByReference(ctx context.Context, ref string) (*model.BankFundRequest, error)
+	UpdateStatus(ctx context.Context, ref, status, providerRef, failureReason string) error
+	SumCompletedToday(ctx context.Context, userID uuid.UUID) (model.Amount, error)
+}
+
 // Compile-time checks that concrete types implement interfaces
 var _ UserRepository = (*UserRepo)(nil)
 var _ WalletRepository = (*WalletRepo)(nil)
 var _ TransactionRepository = (*TransactionRepo)(nil)
 var _ BankAccountRepository = (*BankAccountRepo)(nil)
+var _ ChatMessageRepository = (*ChatMessageRepo)(nil)
+var _ BankFundRepository = (*BankFundRepo)(nil)

@@ -25,6 +25,7 @@ type TransferService struct {
 	txnRepo       repository.TransactionRepository
 	walletRepo    repository.WalletRepository
 	bankRepo      repository.BankAccountRepository
+	auditRepo     *repository.AuditLogRepo
 	walletService *WalletService
 	sourcingEng   *SourcingEngine
 	payoutService *PayoutService
@@ -37,6 +38,7 @@ func NewTransferService(
 	txnRepo repository.TransactionRepository,
 	walletRepo repository.WalletRepository,
 	bankRepo repository.BankAccountRepository,
+	auditRepo *repository.AuditLogRepo,
 	walletService *WalletService,
 	sourcingEng *SourcingEngine,
 	payoutService *PayoutService,
@@ -48,6 +50,7 @@ func NewTransferService(
 		txnRepo:       txnRepo,
 		walletRepo:    walletRepo,
 		bankRepo:      bankRepo,
+		auditRepo:     auditRepo,
 		walletService: walletService,
 		sourcingEng:   sourcingEng,
 		payoutService: payoutService,
@@ -91,6 +94,22 @@ func (s *TransferService) InitiateTransfer(ctx context.Context, userID uuid.UUID
 	// Build debit plan
 	plan, err := s.sourcingEng.BuildDebitPlan(ctx, userID, req.Amount)
 	if err != nil {
+		// Pre-flight failure — no money moved, nothing in the transaction ledger.
+		// Record in audit_logs for ops visibility and compliance.
+		if s.auditRepo != nil {
+			uid := userID
+			_ = s.auditRepo.Write(context.Background(), &model.AuditLog{
+				UserID: &uid,
+				Action: "transfer_attempt",
+				Status: "failed",
+				Metadata: map[string]any{
+					"reason":            err.Error(),
+					"amount_ngn":        req.Amount.NGN(),
+					"recipient_account": req.RecipientAccount,
+					"recipient_bank":    req.RecipientBank,
+				},
+			})
+		}
 		return nil, fmt.Errorf("build debit plan: %w", err)
 	}
 
@@ -328,13 +347,18 @@ func (s *TransferService) executeBankDebit(ctx context.Context, bank *model.Bank
 		if s.monoClient == nil {
 			return fmt.Errorf("mono client not configured")
 		}
-		_, err := s.monoClient.DirectDebit(ctx, bank.ProviderToken, mono.DirectDebitRequest{
-			Amount:    leg.Amount.NGN(),
-			Narration: fmt.Sprintf("Weave transfer %s", legRef),
-			Reference: legRef,
-		})
+		payReq := mono.PaymentInitiateRequest{
+			Amount:      int64(leg.Amount), // already in kobo
+			Type:        "onetime-debit",
+			Method:      "account",
+			Description: fmt.Sprintf("Weave transfer %s", legRef),
+			Reference:   legRef,
+			RedirectURL: "http://localhost:3000/app/accounts",
+		}
+		payReq.Customer.Name = bank.AccountName
+		_, err := s.monoClient.PaymentInitiate(ctx, payReq)
 		if err != nil {
-			return fmt.Errorf("mono direct debit failed: %w", err)
+			return fmt.Errorf("mono payment initiate failed: %w", err)
 		}
 		return nil
 

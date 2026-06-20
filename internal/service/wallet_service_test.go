@@ -12,7 +12,7 @@ import (
 func TestWalletService_GetBalance(t *testing.T) {
 	walletRepo := newMockWalletRepo()
 	userRepo := newMockUserRepo()
-	svc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
+	svc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2348010000000", FullName: "Test", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 50000, LedgerBalance: 40000, Currency: "NGN"}
@@ -42,7 +42,7 @@ func TestWalletService_GetBalance(t *testing.T) {
 func TestWalletService_CreditDebit(t *testing.T) {
 	walletRepo := newMockWalletRepo()
 	userRepo := newMockUserRepo()
-	svc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
+	svc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2348020000000", FullName: "Test", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 0, LedgerBalance: 0, Currency: "NGN"}
@@ -93,7 +93,7 @@ func TestWalletService_CreditDebit(t *testing.T) {
 func TestWalletService_HoldRelease(t *testing.T) {
 	walletRepo := newMockWalletRepo()
 	userRepo := newMockUserRepo()
-	svc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
+	svc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2348030000000", FullName: "Test", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 50000, LedgerBalance: 50000, Currency: "NGN"}
@@ -133,7 +133,7 @@ func TestWalletService_HoldRelease(t *testing.T) {
 func TestWalletService_IssueWalletAccount_NoPaystack(t *testing.T) {
 	walletRepo := newMockWalletRepo()
 	userRepo := newMockUserRepo()
-	svc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
+	svc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2348040000000", FullName: "Test", PIN: "hash"})
 
@@ -146,7 +146,7 @@ func TestWalletService_IssueWalletAccount_NoPaystack(t *testing.T) {
 func TestWalletService_ProcessDepositWebhook(t *testing.T) {
 	walletRepo := newMockWalletRepo()
 	userRepo := newMockUserRepo()
-	svc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
+	svc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2348050000000", FullName: "Test", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 0, LedgerBalance: 0, Currency: "NGN"}
@@ -185,8 +185,8 @@ func TestSourcingEngine_BuildDebitPlan_FromWallet(t *testing.T) {
 	walletRepo := newMockWalletRepo()
 	bankRepo := newMockBankRepo()
 	userRepo := newMockUserRepo()
-	walletSvc := NewWalletService(walletRepo, userRepo, nil, newTestLogger())
-	engine := NewSourcingEngine(walletSvc, bankRepo, newTestLogger())
+	walletSvc := NewWalletService(walletRepo, userRepo, nil, "", nil, nil, nil, nil, newTestLogger())
+	engine := NewSourcingEngine(walletSvc, bankRepo, nil, nil, newTestLogger())
 
 	user, _ := userRepo.Create(context.Background(), model.CreateUserInput{Phone: "+2348060000000", FullName: "Test", PIN: "hash"})
 	wallet := &model.Wallet{UserID: user.ID, Balance: 50000, LedgerBalance: 50000, Currency: "NGN"}
